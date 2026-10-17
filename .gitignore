@@ -174,3 +174,7 @@ results/
 logs/
 tmp/
 third_party/dinov3/
+third_party/dinov3
+
+# pallet training runs
+runs/
