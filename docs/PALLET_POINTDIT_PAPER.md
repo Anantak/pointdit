@@ -10,7 +10,7 @@ manujnaman@anantak.com
 
 :::: content
 
-*Adapting PointDiT to predict metric, pallet-frame geometry and a per-pixel class from a single forklift camera image, and recovering the pallet pose by pixel voting. Working paper, 2026-10-16. Code: branch pallet-pose, package pallet/.*
+*Adapting PointDiT to predict metric, pallet-frame geometry and a per-pixel class from a single forklift camera image, and recovering the pallet pose by pixel voting. Working paper, 2026-10-20. Code: branch pallet-pose, package pallet/.*
 
 
 
@@ -23,9 +23,10 @@ metric, pallet-anchored frame: a four-way class (pallet, load, ground, backgroun
 frame, and two ray angles. The targets come from a lidar reconstruction of each recorded pick, rendered into the camera. The
 backbone, the frozen DINOv3 conditioning and the rectified-flow objective of PointDiT are kept; only the input/output channel
 count, the per-channel masking and an added classification head change. Each pallet or load pixel then casts a vote for the
-camera centre in the pallet frame; the median vote is the pose estimate. Fine-tuned from the public PointDiT-B/256 weights on
-1,453 picks (44k images), the model reaches a median pallet-origin error of 5.2 cm within 2 m, 7.5 cm at 2–3 m and 11.3 cm at
-3–4.5 m on 359 unseen picks, with a rotation error of 0.9 degrees, in a single network evaluation at 240x432 pixels.
+camera centre in the pallet frame; the median vote is the pose estimate. Fine-tuned from the public PointDiT-B/256 weights in six stages up to
+2,030 picks (62k images), the model reaches a median pallet-origin error of 5.5 cm within 2 m, 7.7 cm at 2–3 m and 11.2 cm at
+3–4.5 m on 201 picks that no stage trained on, with a rotation error of about 1 degree, in a single network evaluation at
+432x240 pixels.
 
 ### I. Problem
 
@@ -160,17 +161,28 @@ inference, one 16 GB laptop GPU (RTX 3080 Ti). Medians over the validation image
 | 3 | run 2 | 655 / 20,151 | 12, 16, 7e-5 | 164 | 6.4 | 8.9 | 11.7 | 19.2 | 21.9 | 11.4 | 9.5 | 1.0 | 0.69 |
 | 4 | run 3 | 816 / 25,049 | 10, 16, 5e-5 | 204 | 5.2 | 7.5 | 11.3 | 14.5 | 21.7 | 9.7 | 8.9 | 0.9 | 0.72 |
 | 5 | run 4 | 1,453 / 44,340 | 8, 16, 4e-5 | 359 | 6.1 | 6.9 | 11.5 | 13.6 | 20.2 | 10.5 | 8.5 | 0.9 | 0.71 |
-| 4 on run-5 split | | | | 359 | 5.7 | 7.4 | 12.2 | 13.4 | 21.6 | 10.6 | 8.8 | 0.9 | 0.72 |
 | 6 | run 5 | 2,030 / 62,090 | 8, 16, 3e-5 | 468 | 5.7 | 7.0 | 10.5 | 15.4 | 16.8 | 10.2 | 8.3 | 1.0 | 0.71 |
-| 6 on run-5 split | | | | 359 | 5.7 | 6.0 | 9.8 | 13.1 | 16.6 | 9.2 | 7.9 | 0.9 | 0.72 |
 
 Class accuracy is 0.98–0.99 throughout; load IoU 0.90–0.92; the ground and background classes are easy. The validation set
 changes with every run (more held-out picks), so rows are indicative rather than strictly comparable; the trend with data is
-nevertheless monotone, and within each run the error curve flattens after 6–8 epochs. **Like-for-like** on run 5's 600 validation
-images: run 4 10.5, run 5 10.5, run 6 9.2 cm overall. Run 5 (1,453 picks) did not improve on run 4 (816), but run 6 (2,030 picks,
-including the oldest third of the history) did, almost entirely beyond 3 m (3–4.5 m 12.2 to 9.8, 6–8 m 21.6 to 16.6, 8–12 m 27 to
-19.6 cm), while the near field stayed at 5.7–6.0 cm. The near-field floor is therefore not a data problem; the far field still
-responds to data diversity.
+nevertheless monotone, and within each run the error curve flattens after 6–8 epochs.
+
+**Clean comparison.** Because each run re-split a larger store, a later run has trained on part of an earlier run's validation
+picks, so cross-evaluating on another run's split is biased (run 6 on run 5's split gives 9.2 cm, flattering it by ~1 cm).
+The table below evaluates runs 3–6 on 201 picks (5,854 images, 600 used) that **no run ever trained on**; they are 84 % robot 250
+and harder than the per-run splits (run 6 scores 11.1 here against 10.2 on its own split).
+
+| clean held-out, 201 picks | 0–2 m | 2–3 m | 3–4.5 m | 4.5–6 m | 6–8 m | 8–12 m | all | P err | with GT mask + R | rot (deg) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| run 3 (655 picks) | 6.9 | 10.4 | 12.8 | 19.5 | 25.1 | 38.2 | 12.5 | 10.2 | 9.3 | 1.2 |
+| run 4 (816) | 6.6 | 9.5 | 12.1 | 18.2 | 22.2 | 35.8 | 12.0 | 9.5 | 8.2 | 1.2 |
+| run 5 (1,453) | 6.1 | 8.9 | 11.4 | 15.7 | 21.7 | 28.6 | 11.1 | 8.6 | 7.3 | 1.1 |
+| run 6 (2,030) | 5.5 | 7.7 | 11.2 | 16.5 | 21.2 | 33.6 | 11.1 | 8.3 | 6.7 | 1.1 |
+
+Images per bin: 133, 137, 104, 93, 87, 46. On this set the near field improves steadily with data (0–2 m 6.9 to 5.5 cm, 2–3 m 10.4 to
+7.7 cm, P error 10.2 to 8.3 cm, GT-mask floor 9.3 to 6.7 cm), the 3–4.5 m bin is flat after run 5, and the far bins are too few
+and too noisy to rank runs 5 and 6 (46–93 images, medians moving in both directions). The overall median is equal for runs 5 and 6
+because it is dominated by the mid and far bins.
 
 **Where the remaining error is.** With the ground-truth class mask and ground-truth rotation but the *predicted* P and range, the
 origin error of run 4 drops to 4.1 / 5.6 / 8.2 cm in the first three bins: mask and rotation together cost 1–3 cm. The vote spread
@@ -191,19 +203,20 @@ checkpoint converges in a few thousand steps; training from scratch was not atte
 * The per-frame normalisation of PointDiT is not needed for transfer: fixed per-channel scales and the pretrained blocks suffice,
   and the model keeps metric accuracy at the few-centimetre level near the pallet.
 * The classification head shares the final layer with the regression; this cost nothing in accuracy and avoids a second decoder.
-* Data helps the far field, not the near field. Runs 2 to 4 gained about 1 cm per doubling; run 5 did not improve on run 4, run 6
-  did (9.2 vs 10.5 cm on the same images) but only beyond 3 m. The near-field error (5.7–6.0 cm within 2 m) has been flat since
-  run 4 across a 2.5x increase in training picks: it is not a matter of more picks of the same site with this model and resolution.
+* Data still helps, slowly. On the clean held-out set the near-field error fell by 0.3–0.6 cm per stage from run 3 to run 6 while
+  the training set grew 3x; the mid field stopped improving after run 5 and the far field cannot be ranked with 46–93 images per
+  bin. The earlier "saturation" reading from per-run splits was an artefact of split drift. Another doubling of same-site data
+  would buy perhaps half a centimetre near the pallet; the levers below are cheaper.
 
 #### Error budget
 
-Reading the run-4/5 validation columns together gives a rough decomposition of the near-field origin error (0–3 m, ~6–7 cm):
+Reading run 6's clean held-out columns gives a rough decomposition of the near-field origin error (0–3 m, 5.5–7.7 cm):
 
 | component | evidence | size |
 |---|---|---|
-| vote dispersion of P and range | median |vote − median| ("spread") | 3.7–3.9 cm per vote, largely averaged out by the median over 10^4 votes |
-| class mask (which pixels vote) and rotation | origin error with GT mask + GT R vs predicted | 1.5–2 cm |
-| pallet-frame bias of P | residual with GT mask + GT R | 4.3–5.4 cm |
+| vote dispersion of P and range | median \|vote − median\| ("spread") | 3.7–3.9 cm per vote, largely averaged out by the median over 10^4 votes |
+| class mask (which pixels vote) and rotation | origin error with GT mask + GT R vs predicted | 1.5–2.5 cm |
+| pallet-frame bias of P | residual with GT mask + GT R | 4–5.5 cm |
 | rotation alone | θ error 0.2 deg, φ 0.8 deg, R error 0.9 deg | at 2 m a 0.9 deg error moves the centre by ~3 cm |
 
 So the floor is set by a *systematic* P/range bias per image rather than by noise: the median of 20k votes is 4–5 cm off even with
@@ -241,6 +254,84 @@ Beyond 4.5 m the error grows roughly linearly with distance (14 cm at 5 m, 21 cm
    (the DINOv3 encoder already runs on the unit; the ViT is plain attention and should export directly).
 
 The recommended order is 1 → 2 → 4 in parallel with 3, then decide on 5 from the product requirement for the far field.
+
+### VII. Sequential estimation along the approach (work in progress, 2026-10-20)
+
+**Idea.** During an approach the camera takes 20–50 images of the same static scene. Because the targets live in the pallet
+frame, the previous frame's dense estimate is also a prediction for the next frame: P of a scene point does not change, and
+theta/phi follow exactly from the propagated pose. Because the network was trained with the flow objective at every t, it can be
+*warm-started*: instead of integrating from z = 0 at t = 0, start at time t0 from the propagated prior, z0 = t0 x_prior (+ noise
+where the prior is unknown), and let the image correct it. The sequence then refines one estimate rather than re-estimating from
+scratch, and the pose can be fused over frames.
+
+**Prior construction** (`pallet/sequence.py`). Propagate the previous pose with the inter-frame motion dT (from odometry; here the
+recorded poses, i.e. perfect odometry): R' = R Aᵀ, c' = c − R' b. Angles: exact for every pixel from R'. P and range: the previous
+frame's pallet/load pixels re-rendered into the new view with a 3-px z-buffer splat (P unchanged, range recomputed), plus the
+ground plane y = 0 analytically where it is visible (in front of the face or beside the pallet). Unknown elsewhere.
+
+**Findings on 30 held-out picks, 839 frames, one warm step** (`runs/seq_eval*`; origin error, cm, median per bin):
+
+| prior | 0–2 m | 2–3 m | 3–4.5 m | 4.5–6 m | 6–8 m | 8–12 m | all | rot (deg) |
+|---|---|---|---|---|---|---|---|---|
+| none (single frame, run 6) | 5.6 | 8.2 | 12.2 | 15.4 | 21.6 | 26.8 | 10.9 | 1.15 |
+| previous GT maps + GT pose, t0 0.5 | 3.6 | 3.4 | 3.7 | 3.8 | 4.4 | 6.4 | 3.8 | 0.25 |
+| own maps + GT pose, t0 0.5 | 4.8 | 6.4 | 7.3 | 7.1 | 5.4 | 6.6 | 6.0 | 0.41 |
+| own maps + GT pose, maps only (no angle prior) | 6.9 | 10.7 | 8.3 | 12.0 | 19.8 | 27.8 | 10.8 | 0.96 |
+| own maps + own smoothed pose, t0 0.5 | 8.6 | 11.7 | 15.4 | 17.0 | 28.5 | 33.8 | 13.3 | 1.21 |
+
+1. The mechanism works: given a correct pose, the network refines its own previous maps to 6.0 cm overall, and the far bins
+   collapse from 22–27 cm to 5–7 cm. Three Euler steps from the prior are worse than one everywhere.
+2. Most of the gain enters through the angle channels: with a correct pose they are exact, the network's rotation error drops
+   from 1.15 to 0.4 deg, and every vote improves. A maps-only prior gives almost nothing.
+3. With the model's own pose there is no gain and a slight loss, because the network copies the ~1.2 deg rotation error back in
+   through the same channels, and the error is systematic per pick (smoothing over frames does not reduce it).
+4. Two inference details mattered: unknown prior entries must be filled with noise, as in training (zeros mean "a point at the
+   pallet origin"), and the network never learned to predict a channel from the image where its input is noise at
+   intermediate t, so partial priors damage uncovered pixels. A by-product: the predicted P and range disagree along the ray by
+   ~15 cm median, which argues for a consistency term in training.
+
+**Prior-conditioned training.** The network must be taught to *correct* a prior with a realistic pose error rather than copy it.
+Run 6 was fine-tuned for 3 epochs with, for half of the samples, the input noised from a prior rendered on the fly from a frame
+1–3 back in the same pick (GT pallet/load pixels + visible ground), with the pose perturbed by N(0, 1 deg) / N(0, 5 cm), 4 cm
+P noise, a 4 cm per-frame P bias and 20 % block dropout; the loss is unchanged and covers every valid pixel (`runs/b256_prior1`).
+On the same 30 picks:
+
+| prior1, one warm step | 0–2 m | 2–3 m | 3–4.5 m | 4.5–6 m | 6–8 m | 8–12 m | all | jitter | rot (deg) |
+|---|---|---|---|---|---|---|---|---|---|
+| none (single frame) | 5.4 | 7.6 | 10.7 | 13.7 | 23.3 | 27.2 | 10.2 | 5.4 | 1.19 |
+| own maps + own smoothed pose, t0 0.5 | 5.3 | 7.7 | 10.5 | 13.9 | 25.0 | 27.3 | 9.5 | 4.2 | 1.11 |
+| own maps + own smoothed pose, t0 0.8 | 5.3 | 8.2 | 9.5 | 13.5 | 22.2 | 26.5 | 9.5 | 3.7 | 1.14 |
+| own maps + GT pose, t0 0.8 | 4.0 | 4.9 | 5.6 | 7.2 | 8.2 | 9.7 | 5.5 | 4.0 | 0.42 |
+| previous GT maps + GT pose, t0 0.8 | 3.2 | 3.6 | 3.8 | 4.3 | 5.5 | 7.8 | 4.1 | 3.0 | 0.26 |
+
+Three effects: (i) the single-frame model itself improved (10.9 to 10.2 cm, P 8.0 to 7.3), presumably because the prior samples
+act as a strong augmentation; (ii) with its own pose the warm start now helps instead of hurting (13.3 to 9.5 cm, jitter 5.4 to
+3.7) because the network no longer copies the pose error; (iii) the gain stays small because the rotation error does not move
+(1.1–1.2 deg): it is systematic per pick, the angle prior reproduces it, and the image evidence at one step does not override it.
+With a correct pose the same network reaches 5.5 cm. **The rotation is now the whole game**: a per-pick rotation error of ~1 deg
+at 3 m is 5 cm of origin error, which is most of the gap between 9.5 and 5.5 cm.
+
+**Anatomy of the rotation error** (run 6, clean split, 177 picks): the per-pick mean rotation error is 0.95 deg (median) against a
+frame-to-frame scatter of 0.64 deg; the global mean is 0.16 deg; across picks the mean error varies by 1.35 deg about the vertical
+axis and only 0.3–0.4 deg about the other two. It is a **per-pick yaw bias** of the pallet heading. Two attempts to recover it
+from the sequence failed by construction: the consistency of the voted camera trajectory with the odometry is invariant to a
+global yaw (both trajectories rotate together; fitted yaw uncorrelated with the measured bias, r = 0.08), and the dispersion of
+the votes is equally blind (r = 0.05), because the network's P and angles are mutually consistent even when both carry the bias.
+So the bias is either in the labels, a per-pick heading error of the lidar pallet fit, or a perception bias that moves P and the
+angles together. The two are separable without an external reference: **different models would not share a perception bias,
+but every model disagrees with a biased label in the same way.** On the 177 clean held-out picks, the per-pick mean yaw error of
+runs 3, 4, 5, 6 and the prior-trained model are pairwise correlated at r = 0.92–0.99 (spread 1.3–1.6 deg), and within a pick the
+near and far frames agree (r = 0.80). **The pallet heading of the labels carries a per-pick yaw error of about 1.3 deg (std)** (one caveat: these models form a
+single fine-tuning lineage, so an inherited bias is not fully excluded; an independently initialised model is being trained to
+close that gap).
+
+This reframes the error budget of section VI: the residual 4–5 cm "with GT mask and rotation" is largely label error, the
+network is probably closer to the physical pallet than the tables say, and the "GT pose" gains of the sequential estimator are
+measured against the same biased heading. The highest-value action is therefore on the data side: verify and correct the pallet
+heading in the pipeline's pallet fit (re-fit the face plane from the near-frame lidar, cross-check with the patch cloud), then
+regenerate the targets, which is cheap since the compact records only store the pose and the reconstruction follows, and
+re-evaluate. Sequence fusion cannot remove a label bias; with a consistent heading the warm-started network already delivers
+5.5 cm overall and 8 cm at 6–8 m.
 
 ::::
 

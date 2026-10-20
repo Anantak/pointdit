@@ -84,10 +84,26 @@ def camera_from_manifest(root: Path) -> dict:
     return json.load(open(root / "cameras.json"))
 
 
+class PriorConfig:
+    """How training priors are built from a previous frame of the same pick (sequence.render_prior) and corrupted to look like
+    the model's own propagated estimate: pose noise (rotation about a random axis, translation), per-pixel P noise, a smooth
+    per-frame P bias, random coverage dropout. back = how many frames back to look (uniform in 1..back)."""
+    def __init__(self, back=3, rot_deg=1.0, trans_cm=5.0, p_noise_cm=4.0, p_bias_cm=4.0, dropout=0.2, ground=True, splat=3):
+        self.back, self.rot_deg, self.trans_cm, self.p_noise_cm, self.p_bias_cm = back, rot_deg, trans_cm, p_noise_cm, p_bias_cm
+        self.dropout, self.ground, self.splat = dropout, ground, splat
+
+
 class PalletDataset(Dataset):
     def __init__(self, manifest=DEFAULT_MANIFEST, picks=None, split=None, crop=None, color_jitter=False,
-                 max_range_m=None, pad=True):
+                 max_range_m=None, pad=True, prior: PriorConfig | None = None):
         self.df = load_manifest(manifest, picks, split) if not isinstance(manifest, pd.DataFrame) else manifest.reset_index(drop=True)
+        self.prior = prior
+        if prior is not None:
+            assert pad and crop is None, "priors are rendered at the padded full size"
+            key = list(zip(self.df["robot"].astype(str), self.df["pick"].astype(int)))
+            self._seq = {}                                       # (robot, pick) -> {scan: row index}
+            for i, (k, sc) in enumerate(zip(key, self.df["scan"].astype(int))):
+                self._seq.setdefault(k, {})[sc] = i
         self.crop = tuple(crop) if crop else None
         if self.crop:
             assert self.crop[0] % 16 == 0 and self.crop[1] % 16 == 0, "crop must be a multiple of the 16 px patch"
@@ -121,6 +137,38 @@ class PalletDataset(Dataset):
         assert img.shape[1:] == npz["cls"].shape == (T.RAW_H, T.RAW_W), (img.shape, npz["cls"].shape)
         return img, npz, (fx, fy, cx, cy), row
 
+    def _prev_index(self, i: int):
+        row = self.df.iloc[i]; seq = self._seq[(str(row["robot"]), int(row["pick"]))]
+        cands = [seq[int(row["scan"]) - k] for k in range(1, self.prior.back + 1) if int(row["scan"]) - k in seq]
+        return cands[np.random.randint(len(cands))] if cands else None
+
+    def make_prior(self, i: int, intr_padded, H: int, W: int):
+        """Prior maps for sample i rendered at the padded size from a previous frame's GT, corrupted per self.prior.
+        Returns (cont [6,H,W] f32, mask [6,H,W] bool, has_prior)."""
+        from .sequence import render_prior, relative_motion, propagate_pose
+        j = self._prev_index(i)
+        if j is None:
+            return np.zeros((T.NUM_CONT, H, W), np.float32), np.zeros((T.NUM_CONT, H, W), bool), False
+        _, npz_p, _, _ = self.load_raw(j); _, npz_c, _, _ = self.load_raw(i)
+        pose_p, pose_c = np.asarray(npz_p["pallet_P_cam"], np.float64), np.asarray(npz_c["pallet_P_cam"], np.float64)
+        R0, c0 = pose_p[:9].reshape(3, 3), pose_p[9:].copy()
+        cfg = self.prior
+        # pose corruption: the own pose is ~1 deg / ~5 cm off and the propagation carries that error
+        ang = np.radians(np.random.randn() * cfg.rot_deg); ax = np.random.randn(3); ax /= np.linalg.norm(ax)
+        K = np.array([[0, -ax[2], ax[1]], [ax[2], 0, -ax[0]], [-ax[1], ax[0], 0]])
+        R0 = R0 @ (np.eye(3) + np.sin(ang) * K + (1 - np.cos(ang)) * K @ K)
+        c0 = c0 + np.random.randn(3) * cfg.trans_cm / 100.0
+        R1, c1 = propagate_pose(R0, c0, relative_motion(pose_p, pose_c))
+        P = np.asarray(npz_p["P"], np.float32).copy(); rng = np.asarray(npz_p["range"], np.float32); cls = np.asarray(npz_p["cls"])
+        valid = np.isfinite(rng) & np.isin(cls, (T.CLS_PALLET, T.CLS_LOAD))
+        if cfg.dropout > 0:                                       # coverage holes, in blocks of 16 px
+            hb, wb = (valid.shape[0] + 15) // 16, (valid.shape[1] + 15) // 16
+            keep = np.kron(np.random.rand(hb, wb) > cfg.dropout, np.ones((16, 16), bool))[: valid.shape[0], : valid.shape[1]]
+            valid &= keep
+        P += (np.random.randn(3, 1, 1) * cfg.p_bias_cm + np.random.randn(*P.shape) * cfg.p_noise_cm).astype(np.float32) / 100.0
+        cont, mask, _ = render_prior(P, rng, cls, valid, R1, c1, intr_padded, H, W, splat=cfg.splat, ground=cfg.ground)
+        return cont, mask, True
+
     def __getitem__(self, i: int) -> dict:
         img, npz, (fx, fy, cx, cy), row = self.load_raw(i)
         cont, valid, cls = T.encode(npz)
@@ -143,7 +191,13 @@ class PalletDataset(Dataset):
         image = torch.from_numpy(np.ascontiguousarray(img)).float() / 255.0
         if self.jitter is not None:
             image = self.jitter(image)
+        out_prior = {}
+        if self.prior is not None:
+            pc, pm, has = self.make_prior(i, (fx, fy, cx, cy), cls.shape[0], cls.shape[1])
+            pm &= pixel[None]
+            out_prior = {"prior": torch.from_numpy(pc), "prior_mask": torch.from_numpy(pm), "has_prior": torch.tensor(has)}
         return {
+            **out_prior,
             "image": image,
             "target": torch.from_numpy(np.ascontiguousarray(cont)),
             "valid_mask": torch.from_numpy(np.ascontiguousarray(valid)),

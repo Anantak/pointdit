@@ -21,7 +21,7 @@ from . import targets as T
 class PalletNet(nn.Module):
     def __init__(self, model="PointDiT-B/16", feature_embedding_type="dinov3_vitb16", input_size=256,
                  P_mean=-0.8, P_std=0.8, t_eps=0.05, noise_scale=1.0, zero_t_ratio=0.1, steps=1,
-                 cls_weight=1.0, channel_weights=None):
+                 cls_weight=1.0, channel_weights=None, consist_weight=0.0):
         super().__init__()
         self.net = PointDiT_models[model](input_size=input_size, in_channels=T.NUM_CONT,
                                           feature_embedding_type=feature_embedding_type)
@@ -31,7 +31,7 @@ class PalletNet(nn.Module):
         nn.init.zeros_(self.net.final_layer.linear.weight)          # upstream zero-inits this layer too
         nn.init.zeros_(self.net.final_layer.linear.bias)
         self.P_mean, self.P_std, self.t_eps, self.noise_scale = P_mean, P_std, t_eps, noise_scale
-        self.zero_t_ratio, self.steps, self.cls_weight = zero_t_ratio, steps, cls_weight
+        self.zero_t_ratio, self.steps, self.cls_weight, self.consist_weight = zero_t_ratio, steps, cls_weight, consist_weight
         cw = torch.ones(T.NUM_CONT) if channel_weights is None else torch.as_tensor(channel_weights, dtype=torch.float32)
         self.register_buffer("channel_weights", cw.view(1, T.NUM_CONT, 1, 1), persistent=False)
 
@@ -60,13 +60,22 @@ class PalletNet(nn.Module):
             t = torch.where(torch.rand(n, device=device) < self.zero_t_ratio, torch.zeros_like(t), t)
         return t
 
-    def forward(self, batch: dict) -> tuple[torch.Tensor, dict]:
+    def forward(self, batch: dict, prior_p: float = 0.0) -> tuple[torch.Tensor, dict]:
+        """Training step. With prior_p > 0 and batch["prior"] present, a fraction prior_p of the samples that have a prior are
+        noised from the PRIOR instead of the target (z = t * prior_filled + (1 - t) * e), so the net learns to correct a
+        propagated previous estimate at any t; the loss is always against the current target."""
         x, valid, cls = batch["target"], batch["valid_mask"], batch["cls"]
         img = batch["image"] * 2.0 - 1.0
         B = x.size(0)
         t = self.sample_t(B, x.device).view(B, 1, 1, 1)
         e = torch.randn_like(x) * self.noise_scale
-        z = t * torch.where(valid, x, e) + (1.0 - t) * e
+        x_in = torch.where(valid, x, e)
+        n_prior = 0
+        if prior_p > 0 and "prior" in batch:
+            use = batch["has_prior"].view(B, 1, 1, 1) & (torch.rand(B, 1, 1, 1, device=x.device) < prior_p)
+            x_in = torch.where(use, torch.where(batch["prior_mask"], batch["prior"], e), x_in)
+            n_prior = int(use.sum())
+        z = t * x_in + (1.0 - t) * e
         out = self.net(z, t.flatten(), img)
         x_pred, logits = out[:, :T.NUM_CONT].float(), out[:, T.NUM_CONT:].float()
         w = self.channel_weights / (1.0 - t).clamp_min(self.t_eps) ** 2
@@ -74,23 +83,72 @@ class PalletNet(nn.Module):
         flow = se[valid].mean() if valid.any() else se.sum() * 0.0
         ce = F.cross_entropy(logits, cls, ignore_index=T.CLS_IGNORE)
         loss = flow + self.cls_weight * ce
+        consist = x.new_zeros(())
+        if self.consist_weight > 0:                                         # |P_pred - (c + r_pred * R d)| on hit pixels (metres)
+            consist = self.consistency(x_pred, batch, valid)
+            loss = loss + self.consist_weight * consist
         with torch.no_grad():                                               # per-channel RMSE in raw units, for logs
             err = ((x_pred - x) * T.TARGET_SCALE_T.to(x.device).view(1, -1, 1, 1)) ** 2
             per_ch = torch.stack([err[:, c][valid[:, c]].mean().sqrt() if valid[:, c].any() else err.new_zeros(())
                                   for c in range(T.NUM_CONT)])
-        return loss, {"flow": flow.detach(), "ce": ce.detach(), "rmse_raw": per_ch, "t": t.flatten()}
+        return loss, {"flow": flow.detach(), "ce": ce.detach(), "consist": consist.detach(), "rmse_raw": per_ch, "t": t.flatten(), "n_prior": n_prior}
+
+    @staticmethod
+    def pallet_rays(batch: dict) -> torch.Tensor:
+        """Unit pixel rays of the (padded, possibly cropped) image in the PALLET frame, from intrinsics and the GT pose: [B,3,H,W]."""
+        B, H, W = batch["cls"].shape
+        fx, fy, cx, cy = batch["intrinsics"].T.float()
+        u = torch.arange(W, device=fx.device).float() + 0.5; v = torch.arange(H, device=fx.device).float() + 0.5
+        vv, uu = torch.meshgrid(v, u, indexing="ij")
+        d = torch.stack([(uu[None] - cx[:, None, None]) / fx[:, None, None], (vv[None] - cy[:, None, None]) / fy[:, None, None],
+                         torch.ones(B, H, W, device=fx.device)], 1)
+        d = d / d.norm(dim=1, keepdim=True)
+        R = batch["pallet_P_cam"][:, :9].float().view(B, 3, 3)
+        return torch.einsum("bij,bjhw->bihw", R, d)
+
+    def consistency(self, x_pred: torch.Tensor, batch: dict, valid: torch.Tensor) -> torch.Tensor:
+        """Mean |P_pred - (c + range_pred * d_pallet)| over pixels where P and range are supervised, in metres (decoded units)."""
+        scale, off = T.TARGET_SCALE_T.to(x_pred.device).view(1, -1, 1, 1), T.TARGET_OFFSET_T.to(x_pred.device).view(1, -1, 1, 1)
+        raw = x_pred * scale + off
+        P, r = raw[:, 0:3], raw[:, 3:4]
+        c = batch["cam_in_pallet"].float().view(-1, 3, 1, 1)
+        on_ray = c + r * self.pallet_rays(batch)
+        m = valid[:, 0:1] & valid[:, 3:4]
+        err = (P - on_ray).norm(dim=1, keepdim=True)
+        return err[m].mean() if m.any() else err.sum() * 0.0
 
     # -- inference ---------------------------------------------------------------------------------------------
     @torch.no_grad()
-    def generate(self, image: torch.Tensor, steps: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
-        """image [B,3,H,W] in [0,1] -> (x_pred [B,6,H,W] encoded targets, logits [B,4,H,W])."""
+    def generate(self, image: torch.Tensor, steps: int | None = None, x_prior: torch.Tensor | None = None,
+                 prior_mask: torch.Tensor | None = None, t0: float = 0.0, prior_fill: str = "noise",
+                 generator: torch.Generator | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        """image [B,3,H,W] in [0,1] -> (x_pred [B,6,H,W] encoded targets, logits [B,4,H,W]).
+        Warm start: with x_prior [B,6,H,W] (encoded) and prior_mask [B,6,H,W], integration starts at time t0 instead of 0.
+        prior_fill: "noise" = z0 = t0 * (prior where known, e elsewhere) + (1 - t0) * e, exactly the training distribution;
+        "mixed" = known entries t0 * prior (zero-noise mean), unknown entries pure noise e;
+        "zeros" = t0 * prior with 0 where unknown (WRONG at t0 > 0: an encoded 0 is "a point at the pallet origin"; kept for reference).
+        t0 = 0 / no prior reproduces deterministic single-frame inference from z = 0."""
         steps = steps or self.steps
         img = image * 2.0 - 1.0
         B, _, H, W = img.shape
         ps = self.net.patch_size
         y = self.net.extract_y_embedding(img, H // ps, W // ps)
-        z = torch.zeros(B, T.NUM_CONT, H, W, device=img.device, dtype=img.dtype)
-        ts = torch.linspace(0.0, 1.0, steps + 1, device=img.device)
+        if x_prior is None or t0 <= 0.0:
+            z, t_start = torch.zeros(B, T.NUM_CONT, H, W, device=img.device, dtype=img.dtype), 0.0
+        else:
+            prior = x_prior.to(img.dtype)
+            mask = prior_mask if prior_mask is not None else torch.ones_like(prior, dtype=torch.bool)
+            e = torch.randn(prior.shape, device=prior.device, dtype=prior.dtype, generator=generator) * self.noise_scale
+            if prior_fill == "noise":
+                z = t0 * torch.where(mask, prior, e) + (1.0 - t0) * e
+            elif prior_fill == "mixed":
+                z = torch.where(mask, t0 * prior, e)
+            elif prior_fill == "zeros":
+                z = t0 * torch.where(mask, prior, torch.zeros_like(prior))
+            else:
+                raise ValueError(prior_fill)
+            t_start = float(t0)
+        ts = torch.linspace(t_start, 1.0, steps + 1, device=img.device)
         for i in range(steps):
             t = ts[i]
             out = self.net(z, t.expand(B), img, cached_y_emb=y)

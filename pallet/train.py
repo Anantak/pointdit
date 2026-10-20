@@ -21,7 +21,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from . import targets as T
-from .dataset import DEFAULT_MANIFEST, PalletDataset, assign_splits, load_manifest
+from .dataset import DEFAULT_MANIFEST, PalletDataset, PriorConfig, assign_splits, load_manifest
 from .metrics import aggregate, format_table, image_metrics
 from .model import PalletNet
 from .visualize import panel
@@ -42,6 +42,7 @@ def get_args():
     ap.add_argument("--zero_t_ratio", type=float, default=0.1, help="1.0 = pure regression at t=0")
     ap.add_argument("--noise_scale", type=float, default=1.0)
     ap.add_argument("--cls_weight", type=float, default=1.0)
+    ap.add_argument("--consist_weight", type=float, default=0.0, help="weight of the P-range on-ray consistency loss (metres)")
     ap.add_argument("--channel_weights", type=float, nargs=6, default=None)
     ap.add_argument("--max_range_m", type=float, default=12.0)
     ap.add_argument("--crop", type=int, nargs=2, default=None)
@@ -64,6 +65,13 @@ def get_args():
     ap.add_argument("--resume", default=None)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max_steps", type=int, default=None, help="stop early (smoke tests)")
+    ap.add_argument("--prior_p", type=float, default=0.0, help="fraction of samples trained from a propagated previous-frame prior")
+    ap.add_argument("--prior_back", type=int, default=3)
+    ap.add_argument("--prior_rot_deg", type=float, default=1.0)
+    ap.add_argument("--prior_trans_cm", type=float, default=5.0)
+    ap.add_argument("--prior_noise_cm", type=float, default=4.0)
+    ap.add_argument("--prior_bias_cm", type=float, default=4.0)
+    ap.add_argument("--prior_dropout", type=float, default=0.2)
     return ap.parse_args()
 
 
@@ -135,7 +143,8 @@ def main():
 
     df = assign_splits(load_manifest(args.manifest, args.picks), args.val_frac, args.split_seed)
     df.to_csv(out / "split.csv", index=False)
-    train_ds = PalletDataset(df[df.split == "train"], crop=args.crop, color_jitter=args.color_jitter, max_range_m=args.max_range_m)
+    prior_cfg = PriorConfig(args.prior_back, args.prior_rot_deg, args.prior_trans_cm, args.prior_noise_cm, args.prior_bias_cm, args.prior_dropout) if args.prior_p > 0 else None
+    train_ds = PalletDataset(df[df.split == "train"], crop=args.crop, color_jitter=args.color_jitter, max_range_m=args.max_range_m, prior=prior_cfg)
     val_df = df[df.split == "val"]
     if args.val_max_images and len(val_df) > args.val_max_images:          # even subsample across the val sequences
         val_df = val_df.iloc[np.linspace(0, len(val_df) - 1, args.val_max_images).round().astype(int)]
@@ -147,7 +156,7 @@ def main():
 
     model = PalletNet(model=args.model, feature_embedding_type=args.feature_embedding_type, steps=args.steps,
                       zero_t_ratio=args.zero_t_ratio, noise_scale=args.noise_scale, cls_weight=args.cls_weight,
-                      channel_weights=args.channel_weights)
+                      channel_weights=args.channel_weights, consist_weight=args.consist_weight)
     if not args.no_pretrained:
         print("pretrained:", model.load_pretrained(args.pretrained), flush=True)
     model.to(dev)
@@ -175,7 +184,7 @@ def main():
                 g["lr"] = lr_at(step, total, args)
             batch = to_dev(batch, dev)
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                loss, logs = model(batch)
+                loss, logs = model(batch, prior_p=args.prior_p)
             if not torch.isfinite(loss):
                 print(f"non-finite loss at step {step}, skipping", flush=True); opt.zero_grad(set_to_none=True); step += 1; continue
             opt.zero_grad(set_to_none=True)
@@ -187,7 +196,7 @@ def main():
             seen += batch["image"].size(0)
             if step % args.log_every == 0:
                 r = logs["rmse_raw"].tolist()
-                print(f"ep {epoch} step {step} loss {loss.item():.4f} flow {logs['flow'].item():.4f} ce {logs['ce'].item():.4f} "
+                print(f"ep {epoch} step {step} loss {loss.item():.4f} flow {logs['flow'].item():.4f} ce {logs['ce'].item():.4f} cons {logs['consist'].item():.3f} "
                       f"rmse[m,rad] P({r[0]:.2f},{r[1]:.2f},{r[2]:.2f}) rng {r[3]:.2f} th {r[4]:.3f} ph {r[5]:.3f} "
                       f"lr {opt.param_groups[0]['lr']:.2e} gn {float(gn) if args.grad_clip else 0:.2f} "
                       f"{seen / (time.time() - t0):.1f} img/s mem {torch.cuda.max_memory_allocated() / 2**30:.1f} GB", flush=True)

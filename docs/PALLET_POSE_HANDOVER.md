@@ -109,6 +109,143 @@ Where the data is:
 
 ## Session notes (newest first)
 
+### 2026-10-20 14:05 — PAUSED (user needs the GPU for map building); how to resume
+
+- **Resume prior2** (3rd of 3 epochs, ~1 h at 19 img/s; same flags as the original launch, plus `--resume`):
+  ```
+  cd ~/Libraries/GoogleResearch/pointdit && export DINOV3_REPO=$PWD/third_party/dinov3 DINOV3_WEIGHTS_DIR=$PWD/pretrained/dinov3
+  setsid nohup .venv/bin/python -m pallet.train --out runs/b256_prior2 --resume runs/b256_prior2/checkpoint-last.pth \
+    --pretrained runs/b256_run6/checkpoint-last.pth --batch_size 16 --lr 3e-5 --warmup_steps 300 --epochs 3 --eval_every 1 \
+    --prior_p 0.5 --prior_rot_deg 2.0 --prior_trans_cm 8.0 --consist_weight 0.5 --num_workers 8 >> runs/b256_prior2.log 2>&1 < /dev/null &
+  ```
+  Checkpoint verified: keys model/ema/optimizer/step/epoch, epoch index 1 saved (step 7,760), resume continues at epoch 2.
+- **Then run, in order** (each one command; see `pallet/scripts/day2_2026-10-20.sh` and `day3_2026-10-20.sh` for the exact lines):
+  1. `pallet.sequence --run runs/b256_prior2 --picks 30 --sources pred pred_gtpose oracle --t0 0.2 0.35 0.5 0.8 --steps 1
+     --pose_alpha 0.3 --consistency_cm 0 --splat 3 --prior_fill noise --out runs/seq_eval_prior2`
+  2. `pallet.evaluate --run runs/b256_prior{1,2} --steps 1 --split-from runs/fixed_val --val_max_images 1500`
+  3. the independent-lineage model (`day3` script without its wait line): `runs/b256_indep` from the public B/256 weights,
+     2 epochs, then the per-pick yaw correlation with run 6 (label-bias test).
+- **State of results**: best single-frame = prior2 after 2 epochs (8.16 cm overall on its split; run 6 10.2); best sequence =
+  prior1 own maps + own pose 9.5 cm (GT pose 5.5; oracle 4.1); label yaw bias ~1.3 deg/pick established (lineage caveat pending
+  the indep model). Paper section VII and `runs/yaw_bias_per_pick.csv` are current; PDFs regenerated 13:59.
+- Running on CPU only: tensorboard :6006, `plot_runs --loop` (runs/fit_stats.png), pull_loop (ml-02 -> store), compact_loop.
+
+### 2026-10-20 — sequential estimation (phase 1: warm-started sampling from a propagated prior)
+
+- **Sweep 1 result (30 picks, 839 frames, origin cm overall; `runs/seq_eval/summary.csv`):** single 10.9 | oracle (GT maps + GT pose)
+  5.3 / 4.2 / 3.8 / 3.6 at t0 0.2 / 0.35 / 0.5 / 0.8, rot 0.2-0.4 deg, far bins 4-7 cm | gtcur 5.1 -> 3.1 | oracle maps + own pose
+  10.7-13.8 (no gain: the net copies the 1-deg pose error through the angle prior) | own maps + GT pose 12.5-16.5 with P error
+  40-110 cm (my rendering splatted every predicted pixel incl. background/ground with poor P in front of the pallet) | own maps +
+  own pose 21-65 (both feedbacks). 3 steps worse than 1 everywhere (far bins explode). => mechanism works given a good prior;
+  the own-prediction prior needs (a) class + P-range consistency filtering of what is splatted, (b) a smoothed pose.
+- Sweep 2 launched 08:20 (`runs/seq_eval2`): consistency filter 5 cm, pallet/load only + analytic ground, pose EMA alpha 0.3,
+  pose-only (angles) priors, t0 {0.2, 0.35, 0.5}, 1 step.
+- Sweep 2/3 (own maps + GT pose still P 70-136 cm, far bins better, near worse; angles-only prior catastrophic with zero fill):
+  two faults found. (1) `generate` filled unknown prior entries with 0 = "point at the pallet origin"; now `prior_fill=noise`
+  (training distribution; `mixed`/`zeros` kept). (2) The 5 cm P-range consistency filter kept 0 % of predicted pallet pixels:
+  **predicted P and predicted range disagree along the ray by ~15 cm median** (a finding: the two channels are not mutually
+  consistent; the vote uses both). With no pallet pixels, the analytic ground plane filled the pallet region ("ground 1 m
+  behind") and the net copied it (P displaced along the ray, origin error unaffected). Fixes: consistency filter off, splat 3 px,
+  ground drawn only where visible (z < 0 in front of the face or |x| > 0.9 m). Own-map prior now covers 95 % of the next
+  frame's pallet region at 6.7 cm median P error (diagnostic on 249/109). Sweep 4 launched 09:05 (`runs/seq_eval4`).
+- Smoothed pose alone (EMA alpha 0.3, motion-compensated, no prior): 9.8 vs 10.9 cm single -> the pose-level filter is worth ~1 cm by itself.
+- **Sweep 3 (noise fill, consistency filter still on; `runs/seq_eval3`)**: oracle 6.2 / 4.7 / 4.2 cm at t0 0.2 / 0.35 / 0.5 (zero fill
+  gave 5.3 / 4.2 / 3.8: the zero-noise mean is slightly better for KNOWN entries -> `prior_fill=mixed` is the candidate);
+  angles-only prior still catastrophic (57-122 cm) even with noise-filled P/range. Reading: in training, noise in z at t > 0 only
+  ever marked UNSUPERVISED pixels, so the net never learned to predict P from the image where z is noise at intermediate t;
+  partial priors therefore wreck the uncovered pixels (pred_gtpose P 86-146 cm). Exactly what prior-conditioned training
+  (loss on all valid pixels while z carries a partial prior) should fix.
+- **Sweep 4 (class-only filter, splat 3, visible ground, noise fill; `runs/seq_eval4`) — the maps prior works:** own maps + GT pose,
+  1 step: 8.2 / 6.8 / **6.0 cm overall at t0 0.2 / 0.35 / 0.5** (single 10.9); per bin at t0 0.5: 4.8 / 6.4 / 7.3 / 7.1 / 5.4 / 6.6
+  (single 5.6 / 8.2 / 12.2 / 15.4 / 21.6 / 26.8); P 6.6 (8.0); rot 0.41 deg (from the GT-pose angle prior). Own maps + own
+  smoothed pose: 11.5-13.3 (no gain, worse with t0): **the pose prior is the bottleneck** (the net copies the ~1.2 deg own
+  rotation through theta/phi). Angles-only priors catastrophic as before. Sweep 5 launched 09:15 (`runs/seq_eval5{a,b,c}`):
+  maps-only prior (theta/phi left to the image) and `mixed` fill, own pose vs GT pose, alongside the prior1 training.
+- **Sweep 5 (`runs/seq_eval5{a,b,c}`)**: maps-only prior (angles left to the image) is WORSE than the full prior: own maps + GT pose
+  9.7-10.8 (full 6.0), own maps + own pose 15-17 (single 10.9), rotation 0.93-1.46 deg -> with noise in the angle channels at t0
+  the net's angle output degrades (same gap: noise in z was never "predict from the image" in training). `mixed` fill is
+  slightly better than noise fill (own maps + GT pose 5.7 vs 6.0; + own pose 12.8 vs 13.3). Pose smoothing (EMA) does not reduce
+  the rotation error (stays ~1.2 deg): the per-frame rotation error is systematic per pick, not noise. => Everything now hinges
+  on the prior-conditioned training making the net correct, rather than copy, a prior with ~1 deg / ~5 cm pose error.
+- **prior1 result (`runs/b256_prior1`, 3 epochs, 11:40; `runs/seq_eval_prior1`)**: single-frame on the 30 picks 10.2 cm (run 6: 10.9;
+  P 7.3 vs 8.0) -> the prior training also helped single-frame. **Own maps + own smoothed pose: 10.0 / 9.7 / 9.5 / 9.5 cm at t0
+  0.2 / 0.35 / 0.5 / 0.8 (run 6: 11.5-13.3)**: the net no longer copies the pose error, but the gain is small because the rotation
+  stays 1.1-1.2 deg; jitter 5.4 -> 3.7. Own maps + GT pose 7.9 / 6.5 / 5.9 / 5.5; oracle 6.3 / 5.0 / 4.6 / 4.1. Single-frame
+  training val per epoch 10.6 / 9.8 / 9.8. => The remaining lever is the ROTATION: ~1.1 deg systematic per pick.
+- **Rotation error anatomy (run 6, fixed_val, 1,499 images, 177 picks; `metrics` now stores `rot_err_vec_deg`)**: per-pick |mean
+  rotation error| median 0.95 deg vs within-pick frame-to-frame std 0.64 deg; global mean ~0 (0.16 deg); per-pick mean vector
+  std across picks (x, y, z) = (0.27, 1.35, 0.43) deg -> **a per-pick YAW bias about the pallet y (vertical) axis of ~1 deg**,
+  62 % of picks above 0.7 deg. 1 deg yaw at 3 m = 5 cm lateral origin error (the lateral-dominated residual seen before).
+  Label (pipeline pallet heading) or model? Next experiment: fit one yaw per pick from trajectory/odometry consistency
+  (`pallet/yawfit.py`); if the fit recovers the GT-measured bias, it is model-side and sequence fusion removes it.
+- **Yaw fit: two null results (`pallet/yawfit.py`, `runs/yawfit_run6{,_spread}`)**. (1) Trajectory/odometry consistency is INVARIANT
+  to a global yaw (it rotates the voted and the propagated trajectory together): fit correlation 0.08 with the GT-measured bias,
+  values at the grid bounds. (2) Vote dispersion: correlation 0.05, no change. => The per-pick yaw bias is self-consistent inside
+  the prediction (P and angles agree with each other); it is either a per-pick LABEL bias of the pallet heading (zero global
+  mean, per-pick constant: exactly what a network trained across picks would show against biased labels) or a perception bias
+  that moves P and angles together. Discriminating needs an independent heading reference (raw lidar re-fit near the face, or
+  the unit's lidar pallet detector). Consequence: sequence fusion alone cannot remove it; with an external yaw the warm start
+  reaches 5.5 cm overall and 8 cm at 6-8 m (GT-pose rows).
+- **LABEL YAW BIAS, established (14:10)**: per-pick mean yaw error on fixed_val (177 picks) is the SAME across runs 3/4/5/6/prior1
+  (pairwise r = 0.92-0.99, std ~1.35-1.55 deg) and the same near (<3 m) and far (3-8 m) within a pick (r = 0.80). Different
+  models would not share a perception bias this exactly: **the pallet heading in the labels (pipeline pallet fit) has a per-pick
+  yaw error of ~1.3 deg std**. Consequences: (1) the measured near-field floor (4-5 cm with GT mask + GT R) is largely label error;
+  the network is probably more accurate w.r.t. the physical pallet than the tables say; (2) the "GT pose" sequence gains are
+  measured against the same biased heading; (3) top priority for the data side: fix/verify the pallet heading in the SensorUnit
+  pallet fit (re-fit the face plane from the near-frame lidar, check against the patch cloud), then regenerate targets
+  (cheap: compact records only need the pose; `targets.reconstruct` does the rest) and re-evaluate. Per-pick yaw errors are in
+  `runs/*/eval_steps1_ema_split-fixed_val.json` (`rot_err_vec_deg[1]`), usable to find the worst picks for inspection.
+- Caveat on the label-bias inference: runs 3->4->5->6->prior1 are one LINEAGE (each initialised from the previous), so a shared
+  perception bias inherited through initialisation is not excluded. Third chain `pallet/scripts/day3_2026-10-20.sh` (after chain 2):
+  `runs/b256_indep` from the PUBLIC B/256 weights (2 epochs, split seed 7), then per-pick yaw correlation with run 6 on fixed_val
+  (printed in `runs/day3_2026-10-20.log`). r ~0.9+ confirms the labels; much lower points at the lineage.
+  Per-pick table for the data side: `runs/yaw_bias_per_pick.csv` (177 picks, worst first; 68 picks > 1 deg, 21 > 2 deg, top ones
+  4-5 deg: 250/1046, 250/617, 250/747, 250/485, 249/1281 ...).
+- **13:58 GPU handed to the user (map building).** prior2 stopped after 2 of 3 epochs with its checkpoint saved
+  (`runs/b256_prior2/checkpoint-last.pth`, EMA): single-frame val epoch 1 / 2 = 8.88 / **8.16 cm** overall (prior1 10.6 / 9.8,
+  run 6 10.2 on this split), P 7.6, consistency term 15 -> 5 cm. Chains 2 and 3 killed before their GPU stages: STILL TO RUN when
+  the GPU is free: `pallet.sequence --run runs/b256_prior2 ...` (same flags as prior1's), `pallet.evaluate --split-from
+  runs/fixed_val` for prior1/prior2, and the independent-lineage model (`pallet/scripts/day3_2026-10-20.sh`, remove its wait line).
+  tensorboard (:6006) and the plot loop keep running (CPU only).
+- **Phase 3 code (prior-conditioned training)**: `PalletDataset(prior=PriorConfig(...))` renders, per sample, a prior from a
+  previous frame (1-3 back) of the same pick: GT pallet/load pixels + visible ground, pose corrupted (rot ~N(0,1 deg),
+  trans ~N(0,5 cm)), P noise 4 cm + per-frame bias 4 cm, 16-px block dropout 20 %; `PalletNet.forward(batch, prior_p)` noises the
+  prior instead of the target for a fraction prior_p of samples (loss unchanged); `train.py --prior_p ... --prior_*`;
+  `tests/test_prior_training.py`. Smoke: loss settles in ~30 steps, ~9 img/s at batch 8 while sharing the GPU.
+- **On-ray consistency loss** (`PalletNet.consistency`, `--consist_weight`): mean |P_pred - (c_gt + r_pred * R_gt d)| over
+  supervised hit pixels, metres; test `tests/test_consistency.py` (GT gives < 2 mm). Motivated by the 15 cm P-vs-range
+  disagreement; not yet used by prior1.
+- Second chain `pallet/scripts/day2_2026-10-20.sh` (log `runs/day2_2026-10-20.log`): after prior1's eval -> `runs/b256_prior2`
+  (from run 6, prior_p 0.5, pose corruption 2 deg / 8 cm, consist_weight 0.5, 3 epochs) -> `runs/seq_eval_prior2` -> fixed_val
+  single-frame evals of prior1 and prior2 (`runs/b256_prior*/eval_fixed_val.log`). Paper: draft section VII written (sweeps 1-5).
+- Day chain `pallet/scripts/day_2026-10-20.sh` (log `runs/day_2026-10-20.log`): after sweeps 3/4 -> `runs/b256_prior1`
+  (from run 6, prior_p 0.5, 3 epochs, lr 3e-5, ~4-5 h) -> `runs/seq_eval_prior1` (sources pred / pred_gtpose / oracle, t0
+  0.2-0.8, 1 step, consistency off, splat 3, noise fill). Compare with `runs/seq_eval4` (run 6, same settings).
+
+- Idea (user): along an approach, start each frame's denoising from the previous frame's estimate carried by the known camera
+  motion instead of from zero. Possible because the flow objective trained the net at every t. Code: `PalletNet.generate(...,
+  x_prior, prior_mask, t0, prior_noise)` (z0 = t0 * prior, zero-noise mean by default; unknown entries 0), `pallet/sequence.py`
+  (pose propagation R' = R A^T, c' = c - R' b; exact theta/phi prior from the propagated pose; P/range prior by z-buffer
+  re-rendering of the previous frame's hit pixels + analytic ground plane; sources pred / pred_gtpose / oracle_predpose / oracle /
+  gtcur; metrics + frame-to-frame jitter), `tests/test_sequence.py` (oracle prior matches the next frame's GT: angles 1e-4, P < 3 cm).
+- Smoke (2 picks, t0 0.5, 1 step): single 12.7 cm overall; oracle prior 4.8 cm (far bins 6 cm!); GT-current-at-t0 5.1; **own
+  prediction as prior 37 cm (P 102 cm): error feedback / drift lock-in**. Sweep launched 07:30 on 30 fixed_val picks (839 frames):
+  sources x t0 {0.2, 0.35, 0.5, 0.8} x steps {1, 3 at 0.35/0.8} -> `runs/seq_eval/summary.csv`, log `runs/seq_eval.log`.
+- ml-02: repo + venv + B/256 + run 6 checkpoint being set up by `scratchpad/setup_ml02.sh` (log in the scratchpad) at
+  `~/Libraries/GoogleResearch/pointdit` on ml-02; its GPU (8 GB) is still used by the build pipeline.
+
+### 2026-10-19 15:45 — clean held-out comparison, documents regenerated
+
+- Cross-run comparisons on another run's split are biased (later runs trained on earlier val picks; the other session noted it on
+  10-17). Built `runs/fixed_val/split.csv`: 201 picks (5,854 images; 84 % robot 250) never in any run's train set. `evaluate.py
+  --split-from runs/fixed_val`, 600 images, origin cm per bin (0-2 / 2-3 / 3-4.5 / 4.5-6 / 6-8 / 8-12 / all), P, GT-mask floor:
+  run 3 6.9/10.4/12.8/19.5/25.1/38.2/12.5, P 10.2, 9.3 | run 4 6.6/9.5/12.1/18.2/22.2/35.8/12.0, P 9.5, 8.2 |
+  run 5 6.1/8.9/11.4/15.7/21.7/28.6/11.1, P 8.6, 7.3 | **run 6 5.5/7.7/11.2/16.5/21.2/33.6/11.1, P 8.3, 6.7**. Near field improves
+  steadily with data (not flat: the earlier "saturation" was split drift); mid field flat after run 5; far bins too few to rank.
+  Use `runs/fixed_val` for every future comparison (and keep those 201 picks out of training).
+- Paper corrected (abstract, results, discussion), code guide refreshed; PDFs regenerated with `pallet/scripts/md2pdf.js`
+  (reproduces the Markdown PDF plugin's output: `node pallet/scripts/md2pdf.js docs/X.md docs/X.pdf`).
+
 ### 2026-10-17 07:45 — run 6 result (all data): saturation confirmed
 
 - `runs/b256_run6` (8 epochs, 2,030 train / 468 val picks, 62,090 train images, 7.0 h, 19.8 img/s), EMA 1 step on its own 600-image

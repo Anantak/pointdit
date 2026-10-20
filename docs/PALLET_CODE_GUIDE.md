@@ -5,7 +5,7 @@
 ::: authors
 Manuj Naman, with Claude (Anthropic) as implementation assistant<br>
 *Anantak Robotics*<br>
-2026-10-16
+2026-10-19
 :::
 
 :::: content
@@ -26,7 +26,7 @@ Manuj Naman, with Claude (Anthropic) as implementation assistant<br>
 | `pallet/pose.py` | rotation by Kabsch from (theta, phi), camera-centre votes |
 | `pallet/metrics.py` | per-image metrics, aggregation by face distance |
 | `pallet/train.py` | training loop (bf16, EMA, cosine, validation, panels, resume) |
-| `pallet/evaluate.py` | evaluate a run's checkpoint with 1/3/5 steps or the hybrid |
+| `pallet/evaluate.py` | evaluate a checkpoint: 1/3/5 steps, `--hybrid k`, `--rot-from obj`, `--split-from <run>` for a fixed split |
 | `pallet/visualize.py` | inspection panels in the pipeline's colour scheme |
 | `pallet/plot_runs.py` | fit-statistics chart from the logs |
 | `pallet/scripts/` | data feeders (ray loop, prefetch, puller, compactor), overnight chains |
@@ -37,17 +37,29 @@ Run anything with the repo venv: `.venv/bin/python -m pallet.<module>`; tests: `
 ### II. Data flow with shapes
 
 ```
-raw PNG 424x240 landscape ──rot90──> upright 424(H) x 240(W) ──pad 4+4 rows──> 432 x 240
-ray record (npz) ──targets.encode / reconstruct──> cont [6,424,240], valid [6,424,240], cls [424,240] ──pad──> [6|1,432,240]
-                                                                                              │
-PalletDataset.__getitem__ ───────────────────────────────────────────────────────────────────┘
-   image [3,432,240] f32 in [0,1]     target [6,432,240] f32 (0 where invalid)
-   valid_mask [6,432,240] bool        cls [432,240] int64 (255 = padding)
-   pixel_mask [432,240] bool          intrinsics [4] (fx, fy, cx, cy) of the padded image
-   pallet_P_cam [12] (R row-major, p) cam_in_pallet [3]   face_dist_m, key, scan
-PalletNet.forward(batch) -> loss          PalletNet.generate(image) -> x_pred [B,6,H,W], logits [B,4,H,W]
-targets.decode(x_pred, mask) -> {P [3,H,W], range, theta, phi} in metres / radians
-pose.estimate_pose(...) -> R, c (camera centre in the pallet frame)
+raw PNG 424x240 (landscape)
+  -> rot90 -> upright 424 (H) x 240 (W)
+  -> pad 4 rows top + 4 bottom -> 432 x 240
+
+ray record (npz, full or compact)
+  -> targets.encode / targets.reconstruct
+  -> cont [6,424,240], valid [6,424,240], cls [424,240]
+  -> pad -> [6,432,240] / [432,240]
+
+PalletDataset.__getitem__ returns
+  image        [3,432,240] f32 in [0,1]
+  target       [6,432,240] f32 (0 where invalid)
+  valid_mask   [6,432,240] bool
+  cls          [432,240]   int64 (255 = padding)
+  pixel_mask   [432,240]   bool
+  intrinsics   [4] fx, fy, cx, cy of the padded image
+  pallet_P_cam [12] R row-major then p
+  cam_in_pallet [3];  face_dist_m, key, scan
+
+PalletNet.forward(batch)   -> loss
+PalletNet.generate(image)  -> x_pred [B,6,H,W], logits [B,4,H,W]
+targets.decode(x_pred, m)  -> P [3,H,W], range, theta, phi (m, rad)
+pose.estimate_pose(...)    -> R, c (camera centre in the pallet frame)
 ```
 
 Why the image is 432 tall: the ViT patch is 16 px and 424 = 26.5 patches. Padding on the height keeps the width (240 = 15 patches)
@@ -206,8 +218,10 @@ could do with perfect segmentation); vote spread; number of votes. `aggregate` t
 * **GPU sharing.** The SensorUnit pipeline app is CUDA and runs out of memory next to a training run; building and training alternate.
 * **Waiting on process names.** Two multi-hour stalls came from `pgrep -f <pattern>` matching a shell whose command line merely
   contained the pattern. Wait on files, PIDs, `pgrep -x`, or GPU memory instead.
-* **Validation set drift.** Each run re-splits a larger store; compare runs by trend, or re-evaluate old checkpoints with
-  `pallet/evaluate.py` on a fixed split.
+* **Validation set drift and leakage.** Each run re-splits a larger store, so a later run has *trained on* part of an earlier
+  run's validation picks; cross-evaluating on another run's split is biased. Compare checkpoints only on picks no run ever
+  trained on: `runs/fixed_val/split.csv` marks the 201 such picks (built 2026-10-19 from the union of all `split.csv` train
+  sets), used as `pallet/evaluate.py --split-from runs/fixed_val`.
 * **float32 rotations.** The stored `pallet_P_cam` is float32; use the Frobenius-based angle, not arccos of the trace.
 
 ::::

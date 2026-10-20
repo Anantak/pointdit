@@ -39,6 +39,10 @@ def image_metrics(sample: dict, x_pred: torch.Tensor, logits: torch.Tensor, rot_
     ray_mask = vote_pred if (rot_from == "obj" and vote_pred.sum() >= 500) else real
     est = estimate_pose(pr["P"], pr["range"], pr["theta"], pr["phi"], rays, vote_pred, ray_mask)
     m["rot_err_deg"] = rotation_error_deg(est["R"], R_gt)
+    dR = est["R"] @ R_gt.T                                                   # signed error as a rotation vector (deg), pallet frame
+    ang = np.arccos(np.clip((np.trace(dR) - 1) / 2, -1, 1))
+    axis = np.array([dR[2, 1] - dR[1, 2], dR[0, 2] - dR[2, 0], dR[1, 0] - dR[0, 1]])
+    m["rot_err_vec_deg"] = (np.degrees(ang) * axis / max(np.linalg.norm(axis), 1e-12)).tolist()
     m["origin_err_cm"] = float(np.linalg.norm(est["c"] - c_gt) * 100)
     m["origin_err_xyz_cm"] = ((est["c"] - c_gt) * 100).tolist()
     m["vote_spread_cm"] = est["spread"] * 100
