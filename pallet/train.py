@@ -16,6 +16,7 @@ from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -33,6 +34,7 @@ def get_args():
     ap.add_argument("--picks", nargs="*", default=None, help="restrict to picks robot/pick; default all with tensors")
     ap.add_argument("--val_frac", type=float, default=0.2)
     ap.add_argument("--split_seed", type=int, default=0)
+    ap.add_argument("--split_csv", default=None, help="use this split.csv (manifest rows + split column) instead of a fresh random split")
     ap.add_argument("--out", required=True)
     ap.add_argument("--pretrained", default="pretrained/pointditb-256-scenenet-nodinov3-58f0b231.pth")
     ap.add_argument("--no_pretrained", action="store_true")
@@ -141,7 +143,7 @@ def main():
     json.dump(vars(args), open(out / "args.json", "w"), indent=1)
     dev = torch.device("cuda")
 
-    df = assign_splits(load_manifest(args.manifest, args.picks), args.val_frac, args.split_seed)
+    df = pd.read_csv(args.split_csv, dtype={"robot": str}) if args.split_csv else assign_splits(load_manifest(args.manifest, args.picks), args.val_frac, args.split_seed)
     df.to_csv(out / "split.csv", index=False)
     prior_cfg = PriorConfig(args.prior_back, args.prior_rot_deg, args.prior_trans_cm, args.prior_noise_cm, args.prior_bias_cm, args.prior_dropout) if args.prior_p > 0 else None
     train_ds = PalletDataset(df[df.split == "train"], crop=args.crop, color_jitter=args.color_jitter, max_range_m=args.max_range_m, prior=prior_cfg)

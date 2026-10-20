@@ -304,8 +304,16 @@ On the same 30 picks:
 | own maps + GT pose, t0 0.8 | 4.0 | 4.9 | 5.6 | 7.2 | 8.2 | 9.7 | 5.5 | 4.0 | 0.42 |
 | previous GT maps + GT pose, t0 0.8 | 3.2 | 3.6 | 3.8 | 4.3 | 5.5 | 7.8 | 4.1 | 3.0 | 0.26 |
 
-Three effects: (i) the single-frame model itself improved (10.9 to 10.2 cm, P 8.0 to 7.3), presumably because the prior samples
-act as a strong augmentation; (ii) with its own pose the warm start now helps instead of hurting (13.3 to 9.5 cm, jitter 5.4 to
+A second variant (`prior2`) added a stronger pose corruption (2 deg / 8 cm) and an **on-ray consistency loss**, the mean distance
+between the predicted P and the point at the predicted range along the pixel ray in the pallet frame, weight 0.5 (motivated by
+the 15 cm disagreement noted above). After two epochs, on the clean 201-pick split, it lowers the origin error from 10.5 (run 6)
+to 8.4 cm overall and from 5.8 / 7.9 / 11.1 to 4.3 / 5.8 / 8.5 cm in the first three bins, with P error and rotation unchanged
+(7.7 cm, 1.0 deg) and the GT-mask floor down from 6.8 to 4.7 cm: the votes became mutually consistent, which is what the median
+needs. It is the best single-frame model to date. In sequence mode its own-pose warm start gives 8.0–8.3 cm against 8.4
+single-frame (jitter 4.1 to 2.8 cm); with a correct pose 4.4 cm; with the previous frame's ground truth 3.2 cm.
+
+Three effects of prior-conditioned training: (i) the single-frame model itself improved (run 6 10.5 to prior1 9.9 to prior2
+8.4 cm on the clean split), partly because the prior samples act as a strong augmentation and partly through the consistency term; (ii) with its own pose the warm start now helps instead of hurting (13.3 to 9.5 cm, jitter 5.4 to
 3.7) because the network no longer copies the pose error; (iii) the gain stays small because the rotation error does not move
 (1.1–1.2 deg): it is systematic per pick, the angle prior reproduces it, and the image evidence at one step does not override it.
 With a correct pose the same network reaches 5.5 cm. **The rotation is now the whole game**: a per-pick rotation error of ~1 deg
@@ -321,11 +329,13 @@ So the bias is either in the labels, a per-pick heading error of the lidar palle
 angles together. The two are separable without an external reference: **different models would not share a perception bias,
 but every model disagrees with a biased label in the same way.** On the 177 clean held-out picks, the per-pick mean yaw error of
 runs 3, 4, 5, 6 and the prior-trained model are pairwise correlated at r = 0.92–0.99 (spread 1.3–1.6 deg), and within a pick the
-near and far frames agree (r = 0.80). **The pallet heading of the labels carries a per-pick yaw error of about 1.3 deg (std)** (one caveat: these models form a
-single fine-tuning lineage, so an inherited bias is not fully excluded; an independently initialised model is being trained to
-close that gap).
+near and far frames agree (r = 0.80). **The pallet heading of the labels carries a per-pick yaw error of about 1.3 deg (std).** The one alternative, a bias inherited
+through the fine-tuning lineage of runs 3–6, is excluded by a model trained from the public PointDiT weights for two epochs
+with no shared ancestry and a different split: it is far less accurate (16 cm overall) yet makes the same per-pick yaw errors
+as run 6, r = 0.89 over 177 picks. What these models share is the labels.
 
-This reframes the error budget of section VI: the residual 4–5 cm "with GT mask and rotation" is largely label error, the
+**For the product this is decisive**: the sideways error at distance is this heading error times the distance (section VII
+shows r = 0.98 between the two), so the lateral accuracy of the system is label-limited today. This reframes the error budget of section VI: the residual 4–5 cm "with GT mask and rotation" is largely label error, the
 network is probably closer to the physical pallet than the tables say, and the "GT pose" gains of the sequential estimator are
 measured against the same biased heading. The highest-value action is therefore on the data side: verify and correct the pallet
 heading in the pipeline's pallet fit (re-fit the face plane from the near-frame lidar, cross-check with the patch cloud), then

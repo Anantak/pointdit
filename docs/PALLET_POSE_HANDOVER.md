@@ -129,6 +129,37 @@ Where the data is:
   prior1 own maps + own pose 9.5 cm (GT pose 5.5; oracle 4.1); label yaw bias ~1.3 deg/pick established (lineage caveat pending
   the indep model). Paper section VII and `runs/yaw_bias_per_pick.csv` are current; PDFs regenerated 13:59.
 - Running on CPU only: tensorboard :6006, `plot_runs --loop` (runs/fit_stats.png), pull_loop (ml-02 -> store), compact_loop.
+- **18:36 LABEL YAW BIAS CONFIRMED (ml-02 chain done)**: `runs/b256_indep` (public B/256 weights, no lineage with runs 3-6, 2 epochs,
+  only 16.0 cm overall) makes the SAME per-pick yaw errors as run 6: **r = 0.89 over 177 clean picks** (std 1.52 / 1.34 deg).
+  Initialisation lineage is excluded; what the models share is the training labels. => the pipeline's pallet heading is off by
+  ~1.3 deg (std) per pick; lateral error at distance is this bias times distance. Top action (data side): verify/correct the
+  heading in the SensorUnit pallet fit, regenerate poses, re-evaluate; the model is likely better laterally than measured.
+  Final numbers of the day on the clean split (origin all / lateral 0-2, 2-3, 3-4.5 m / yaw): run 6 10.5 / 3.5, 5.2, 6.8 / 1.07;
+  prior2 ep3 8.0 / 3.0, 4.3, 6.7 / 1.05; indep 16.0 / - / 1.28. Checkpoints: prior2 ep3 on ml-02 (copied to the laptop 18:40).
+- **17:20 prior2 epoch 3 done on ml-02 (16:25)**: clean split origin 8.0 cm overall (ep2 8.4); lateral per bin 3.0 / 4.3 / 6.7 / 9.2 /
+  13.4 / 15.6 cm; yaw 1.05 deg; P 7.6. Final prior2 checkpoint lives on ml-02 (`runs/b256_prior2/checkpoint-last.pth` there;
+  copy back). indep model training (epoch 1 of 2 at 17:16, 20 img/s), done ~18:40 + eval + yaw test.
+- **15:10 user priority: LATERAL alignment from afar (10 m) matters most; depth can lean on lidar; final assessment by lidar.**
+  Clean-split medians (prior2): lateral |x| 3.0 / 4.4 / 6.9 / 9.7 / 13.1 / 13.5 cm per bin, depth |z| 1.7 / 2.2 / 2.8 / 4.6 / 7.2 /
+  12.4 cm, |yaw| ~0.9 deg everywhere. **Signed lateral error = -(distance x signed yaw error) with r = -0.98 (3-12 m)**: the lateral
+  offset from the centreline is entirely the yaw estimate; depth is already small. => yaw is THE target for the product metric:
+  resolve the label-heading question (indep model tonight), then yaw-focused training (phi weight, multi-frame yaw consistency
+  within a pick), yaw fusion over the approach (removes the 0.64 deg scatter, not the bias), far-field levers. New headline
+  metrics to add to evaluate/aggregate: lateral error, depth error, yaw error by distance (currently derivable from
+  origin_err_xyz_cm / rot_err_vec_deg in the JSONs).
+- **14:45 results from ml-02 (clean fixed_val split, 201 picks, 1,499 images; origin cm 0-2 / 2-3 / 3-4.5 / 4.5-6 / 6-8 / 8-12 / all):**
+  run 6 5.8 / 7.9 / 11.1 / 15.4 / 19.7 / 30.6 / 10.5 | prior1 5.6 / 7.3 / 10.2 / 14.2 / 21.0 / 30.5 / 9.9 |
+  **prior2 (2 epochs) 4.3 / 5.8 / 8.5 / 12.3 / 16.8 / 24.8 / 8.4**; P 8.3 / 7.6 / 7.7; GT-mask floor 6.8 / 6.2 / 4.7; rot 1.07 / 1.06 / 1.04.
+  The consistency loss (+ stronger prior corruption) cut the origin error by 20 % at every distance without changing P or the
+  rotation: the votes became self-consistent. **prior2 is the new best single-frame model.** prior2 sequence eval (30 picks,
+  `runs/seq_eval_prior2`): single 8.4; own maps + own pose 8.0-8.3 (jitter 4.1 -> 2.8); + GT pose 4.4-5.0; oracle 3.2-4.0.
+- **14:25 deferred work moved to ml-02** (its GPU freed; build done at 3,296 picks): `pallet/scripts/ml02_chain_2026-10-20.sh`
+  running there (log `~/Libraries/GoogleResearch/pointdit/runs/ml02_chain_2026-10-20.log` on ml-02): manifest refresh ->
+  `pallet/make_split.py` builds `runs/fixed_val/split.csv` and `runs/b256_prior2/split.csv` from the pick lists in
+  `pallet/splits/` (same picks as the laptop, ml-02 paths) -> prior2 sequence eval -> fixed_val evals (prior1/prior2/run6) ->
+  prior2's 3rd epoch resumed at batch 8 / lr 1.5e-5 (`--split_csv`, `runs/b256_prior2_ml02.log`) -> `runs/b256_indep` (public
+  weights, 2 epochs, batch 8) -> indep eval + yaw correlation with run 6. Results land on ml-02; copy `runs/*` back
+  (rsync) when done. `train.py --split_csv` and `pallet/make_split.py` are new (uncommitted).
 
 ### 2026-10-20 — sequential estimation (phase 1: warm-started sampling from a propagated prior)
 
