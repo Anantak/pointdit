@@ -109,6 +109,34 @@ Where the data is:
 
 ## Session notes (newest first)
 
+### 2026-10-21 — CONTEXT SAVED; nothing running; resume points
+
+**Where PalletDiT stands.** Best model `runs/b256_prior2` (checkpoint on the laptop and on ml-02; EMA under key `ema`). Clean split
+(`runs/fixed_val`, 201 picks never trained on, pick list in `pallet/splits/fixed_val_picks_2026-10-19.csv`): lateral 3.3 / 4.2 /
+6.7 / 9.8 / 12.2 / 17.3 cm per bin, depth 1.6-11.5, yaw ~0.9 deg, pallet centre in the camera frame 1.5-3.3 cm / bearing 0.2-0.5 deg.
+Sequential config to deploy: `pallet.sequence --sources pred --t0 0.8 --t0_far 3 6 --pose_alpha 0.2` (lateral 3.1 / 4.0 / 6.0 / 9.4
+below 6 m). Everything is in `docs/PALLET_POINTDIT_PAPER.md` (sections V-VIII) and `docs/PALLET_CODE_GUIDE.md`; PDFs current.
+
+**Established facts that steer the next work.** (1) Lateral error = distance x yaw error (r 0.98). (2) The yaw error is a per-pick
+LABEL bias (~1.3 deg std) of the pipeline's pallet heading: every model shares it, incl. an independently initialised one
+(r 0.89); not recoverable from sequence geometry (trajectory and vote dispersion are both yaw-invariant); yaw fusion over
+frames: null. (3) Warm start works given a correct pose (5.5 cm overall, far bins 5-8 cm) and needs prior-conditioned training
+to be safe with the own pose; prior must fade with distance. (4) On-ray consistency loss cut origin error 20 % (prior2).
+
+**Resume options (pick one).**
+A. Critical path (user/pipeline side): verify + correct the pallet heading (worst picks: `docs/yaw_bias_per_pick_2026-10-20.csv`),
+   regenerate poses (compact records only need the pose), re-run `pallet.evaluate --run runs/b256_prior2 --split-from runs/fixed_val`
+   -> if lateral drops, retrain with yaw focus (phi weight, within-pick heading consistency).
+B. ml-02 autonomous: PointDiT-L/256 fine-tune for the far field (batch 4-8 on 8 GB, ~1 day); per-frame output dump of the
+   sequential config for the planner team; heading-consistency training term.
+C. Integration: pallet centre (camera frame) + bearing as explicit outputs; TensorRT export (`~/Anantak/TensorRT-Models/docs/ADDING_A_MODEL.md`).
+
+**Machines.** Laptop (ana-ml-1): GPU reserved for the user's map building; store `~/Anantak/Data/PalletTrainImages` (2,620 picks);
+tensorboard :6006 and the plot loop may still be running (CPU). ml-02: repo at `~/Libraries/GoogleResearch/pointdit` (venv, weights,
+checkpoints, `runs/fixed_val/split.csv` built for its manifest of 3,341 picks); GPU free. Sync code with
+`rsync -a --exclude .venv --exclude runs --exclude pretrained --exclude third_party/dinov3 pointdit/ ml-02:~/Libraries/GoogleResearch/pointdit/`.
+Rules: never wait on `pgrep -f <pattern>`; compare models only on `runs/fixed_val`; docs in the Markdown-PDF fenced-div format.
+
 ### 2026-10-20 19:00 — the model is named **PalletDiT**; work continues on ml-02
 
 - **21:35 yaw fusion = null result** (prior2, 60 clean picks, 1,746 frames, warm start t0 0.5, `runs/yawfuse_a02/a01/a005` on ml-02):
