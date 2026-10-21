@@ -375,7 +375,14 @@ weight of 0.2, 0.1 or 0.05 on each new frame, and every frame's votes re-project
 error is the per-pick bias, not scatter. In lateral terms the warm start itself (own maps, own pose, t0 0.5) against
 single-frame on the same 60 picks reads 2.9 / 3.6 / 5.1 cm vs 3.3 / 3.9 / 6.1 cm at 0–2 / 2–3 / 3–4.5 m, and 12.3 / 19.3 vs
 10.9 / 16.3 cm at 6–8 / 8–12 m: it helps near the pallet and hurts far away, where a stale prior from a worse frame dominates.
-A distance-dependent t0 (strong prior near, weak far) is the obvious follow-up.
+A distance-dependent trust fixes this: scaling t0 from its full value at 3 m to zero at 6 m (using the previous frame's
+estimated distance), with t0 0.8 and pose weight 0.2, gives 2.9 / 3.6 / 5.3 / 7.5 / 10.9 / 16.3 cm across the six bins against
+3.3 / 3.9 / 6.1 / 8.4 / 10.9 / 16.3 single-frame, jitter 4.1 to 3.3 cm, yaw 0.88 to 0.74 deg: better or equal at every distance.
+On all 201 clean picks (5,850 frames) the same configuration gives, single-frame to warm-started: lateral 3.3 / 4.2 / 6.7 /
+9.8 cm to 3.1 / 4.0 / 6.0 / 9.4 cm in the four bins below 6 m (identical beyond, where the prior is off), yaw 0.90 to 0.84 deg,
+3D origin 8.1 to 7.9 cm, depth 2.9 to 2.7 cm, with the pallet-centre bearing unchanged at 0.2–0.5 deg. The gain is consistent
+but modest, a few millimetres to seven millimetres sideways, because the heading it inherits carries the label bias; it is the
+sequential configuration to deploy, and its value grows with the heading accuracy.
 
 **Steering before the yaw is known.** The unit can also steer on the pallet centre as seen from the camera, i.e. the bearing and
 the lateral position of the pallet origin in the camera frame, which do not depend on the heading estimate. For prior2 on the

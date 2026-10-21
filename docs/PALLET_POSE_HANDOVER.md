@@ -119,7 +119,15 @@ Where the data is:
 - Same run, lateral single vs warm start (own maps + own pose, t0 0.5), 60 picks: 3.3 / 3.9 / 6.1 / 8.4 / 10.9 / 16.3 cm ->
   2.9 / 3.6 / 5.1 / 8.9 / 12.3 / 19.3 cm: the warm start helps < 4.5 m and HURTS beyond 6 m (stale prior from a worse frame).
   Follow-up: distance-dependent t0 (strong near, weak far) or no warm start beyond ~5 m.
-- **22:10 yaw-independent steering accuracy (prior2, clean split)**: pallet centre lateral position in the CAMERA frame 1.4 / 1.8 /
+- **21:45 distance-dependent warm start works** (`--t0_far D_NEAR D_FAR`: t0 scaled from full at <= D_NEAR to 0 at >= D_FAR using the
+  previous frame's estimated distance; `runs/t0far_4_7`, `runs/t0far_3_6` on ml-02, 60 clean picks): t0 0.8 fade 3-6 m, alpha 0.2
+  -> lateral 2.9 / 3.6 / 5.3 / 7.5 / 10.9 / 16.3 cm vs single 3.3 / 3.9 / 6.1 / 8.4 / 10.9 / 16.3; jitter 4.1 -> 3.3; yaw 0.88 -> 0.74.
+  Better or equal everywhere => recommended sequential configuration.
+- **21:58 same config on all 201 clean picks (`runs/seq_final_prior2`, 5,850 frames)**: lateral 3.3 / 4.2 / 6.7 / 9.8 / 12.2 / 17.3 cm
+  single -> 3.1 / 4.0 / 6.0 / 9.4 / 12.2 / 17.3 warm; yaw 0.90 -> 0.84; origin 8.1 -> 7.9; depth 2.9 -> 2.7; centre-in-camera lateral
+  1.5 / 1.7 / 1.7 / 2.0 / 2.5 / 3.3 cm, bearing 0.2-0.5 deg (both). Gain consistent but modest (label-limited heading).
+  Night state: nothing running on either GPU; all results in docs; paper PDF regenerated; committed.
+- **21:40 yaw-independent steering accuracy (prior2, clean split)**: pallet centre lateral position in the CAMERA frame 1.4 / 1.8 /
   1.8 / 1.9 / 2.6 / 3.1 cm per bin (vs centreline offset 3.0 / 4.3 / 6.7 / 9.2 / 13.4 / 15.6), bearing 0.2-0.5 deg, depth 1.6 /
   2.2 / 2.6 / 4.2 / 6.9 / 11.2 cm. => PalletDiT finds the pallet CENTRE to 2-3 cm sideways at any distance incl. 10 m; only the
   heading (yaw) is ~1 deg and label-limited. Product suggestion: steer on the centre bearing from afar, align to the centreline
