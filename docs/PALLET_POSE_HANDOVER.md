@@ -109,6 +109,13 @@ Where the data is:
 
 ## Session notes (newest first)
 
+### 2026-10-20 19:00 — the model is named **PalletDiT**; work continues on ml-02
+
+- User: name = PalletDiT. Docs renamed (paper title, code guide), paper section VIII "Status and current work" added, PDFs regenerated.
+- Running on ml-02: yaw fusion along the approach (`pallet.sequence --sources pred --pose_alpha 0.2 / 0.1 / 0.05`, 60 clean picks,
+  prior2), `runs/yawfuse_a0*` + `runs/yawfuse_chain.log` there. New metrics: lateral/depth/yaw (+ fused_*) in `metrics.py`.
+- Laptop GPU reserved for the user's map building.
+
 ### 2026-10-20 14:05 — PAUSED (user needs the GPU for map building); how to resume
 
 - **Resume prior2** (3rd of 3 epochs, ~1 h at 19 img/s; same flags as the original launch, plus `--resume`):

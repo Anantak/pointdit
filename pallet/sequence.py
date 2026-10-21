@@ -162,6 +162,14 @@ def run_pick(net, ds: PalletDataset, idx: list[int], source: str, t0: float, ste
                 "pred": dec, "cls_pred": cls_pred, "R_est": R_est, "c_est": c_est, "R_sm": R_sm, "c_sm": c_sm, "real": real,
                 "rays": T.pixel_rays(fx, fy, cx, cy, H, W)}
         row["smoothed_origin_err_cm"] = float(np.linalg.norm(c_sm - pose_gt[9:]) * 100)
+        # fused pose: the frame's own votes re-projected with the fused rotation R_sm (yaw scatter averages out along the approach)
+        vote = np.isin(cls_pred, (T.CLS_PALLET, T.CLS_LOAD)) & real & np.isfinite(dec["range"])
+        if vote.any():
+            c_f = np.median(dec["P"][:, vote].T - dec["range"][vote][:, None] * (prev["rays"][vote] @ R_sm.T), axis=0)
+            e = c_f - pose_gt[9:]; R_gt = pose_gt[:9].reshape(3, 3); dR = R_sm @ R_gt.T
+            ang = np.arccos(np.clip((np.trace(dR) - 1) / 2, -1, 1)); ax = np.array([dR[2, 1] - dR[1, 2], dR[0, 2] - dR[2, 0], dR[1, 0] - dR[0, 1]])
+            row.update({"fused_origin_err_cm": float(np.linalg.norm(e) * 100), "fused_lateral_err_cm": float(abs(e[0]) * 100),
+                        "fused_depth_err_cm": float(abs(e[2]) * 100), "fused_yaw_err_deg": float(abs(np.degrees(ang) * ax[1] / max(np.linalg.norm(ax), 1e-12)))})
     return rows
 
 
@@ -218,10 +226,13 @@ def main():
         json.dump({"config": name, "per_image": rows, "aggregate": agg, "jitter_cm": jit}, open(out / f"{name}.json", "w"), indent=1)
         warm = [r for r in rows if r["warm"]]
         sm = float(np.median([r["smoothed_origin_err_cm"] for r in rows if np.isfinite(r.get("smoothed_origin_err_cm", np.nan))]))
-        line = {"config": name, "jitter_cm": round(jit, 2), "smoothed_all": round(sm, 1), "prior_valid": round(float(np.mean([r["prior_valid_frac"] for r in warm])), 2) if warm else 0.0,
-                **{r["bin"]: round(r["origin_err_cm"], 1) for r in agg}, "P_all": round(agg[-1]["P_err_cm"], 1), "rot_all": round(agg[-1]["rot_err_deg"], 2)}
+        line = {"config": name, "jitter_cm": round(jit, 2), "prior_valid": round(float(np.mean([r["prior_valid_frac"] for r in warm])), 2) if warm else 0.0,
+                **{r["bin"]: round(r["origin_err_cm"], 1) for r in agg}, "P_all": round(agg[-1]["P_err_cm"], 1), "yaw_all": round(agg[-1]["yaw_err_deg"], 2),
+                **{"lat " + r["bin"]: round(r["lateral_err_cm"], 1) for r in agg},
+                **{"fused lat " + r["bin"]: round(r["fused_lateral_err_cm"], 1) for r in agg}, "fused_yaw_all": round(agg[-1]["fused_yaw_err_deg"], 2)}
         summary.append(line)
         print(f"[{name}] {time.time() - t_start:.0f}s", {k: v for k, v in line.items() if k != "config"}, flush=True)
+        print(format_table(agg).split("\n\n")[0], flush=True)
     pd.DataFrame(summary).to_csv(out / "summary.csv", index=False)
     print(pd.DataFrame(summary).to_string(index=False))
 

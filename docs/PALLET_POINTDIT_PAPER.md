@@ -1,5 +1,5 @@
 ::: title
-## Pallet Pose from Forkview Images with a Pixel-Space Diffusion Transformer
+## PalletDiT: Pallet Pose from Forkview Images with a Pixel-Space Diffusion Transformer
 :::
 
 ::: authors
@@ -10,7 +10,7 @@ manujnaman@anantak.com
 
 :::: content
 
-*Adapting PointDiT to predict metric, pallet-frame geometry and a per-pixel class from a single forklift camera image, and recovering the pallet pose by pixel voting. Working paper, 2026-10-20. Code: branch pallet-pose, package pallet/.*
+*PalletDiT adapts PointDiT to predict metric, pallet-frame geometry and a per-pixel class from a single forklift camera image, and recovers the pallet pose by pixel voting, single-frame or warm-started along the approach. Working paper, status of 2026-10-20 evening. Code: branch pallet-pose, package pallet/.*
 
 
 
@@ -255,7 +255,7 @@ Beyond 4.5 m the error grows roughly linearly with distance (14 cm at 5 m, 21 cm
 
 The recommended order is 1 → 2 → 4 in parallel with 3, then decide on 5 from the product requirement for the far field.
 
-### VII. Sequential estimation along the approach (work in progress, 2026-10-20)
+### VII. Sequential estimation along the approach
 
 **Idea.** During an approach the camera takes 20–50 images of the same static scene. Because the targets live in the pallet
 frame, the previous frame's dense estimate is also a prediction for the next frame: P of a scene point does not change, and
@@ -342,6 +342,46 @@ heading in the pipeline's pallet fit (re-fit the face plane from the near-frame 
 regenerate the targets, which is cheap since the compact records only store the pose and the reconstruction follows, and
 re-evaluate. Sequence fusion cannot remove a label bias; with a consistent heading the warm-started network already delivers
 5.5 cm overall and 8 cm at 6–8 m.
+
+### VIII. Status and current work (2026-10-20, evening)
+
+**Where PalletDiT stands.** The deployed candidate is `runs/b256_prior2`: PointDiT-B/16 at 432x240 with the 6 + 4 channel head,
+fine-tuned in seven stages from the public B/256 weights, the last two with prior-conditioned training and the on-ray
+consistency loss, on 2,030 picks. On 201 picks no stage trained on, one forward pass per image gives, as medians:
+
+| face distance | lateral offset error | depth error | yaw error | 3D origin error |
+|---|---|---|---|---|
+| 0–2 m | 3.0 cm | 1.7 cm | 0.8 deg | 4.3 cm |
+| 2–3 m | 4.3 cm | 2.2 cm | 1.0 deg | 5.8 cm |
+| 3–4.5 m | 6.7 cm | 2.8 cm | 0.9 deg | 8.5 cm |
+| 4.5–6 m | 9.2 cm | 4.6 cm | 0.9 deg | 12.3 cm |
+| 6–8 m | 13.4 cm | 7.2 cm | 1.0 deg | 16.8 cm |
+| 8–12 m | 15.6 cm | 12.4 cm | 0.9 deg | 24.8 cm |
+
+**What the product needs.** The unit must align sideways with the pallet centreline from about 10 m onwards; the longitudinal
+distance can be informed by the lidar, which also makes the final assessment near the pallet. The headline metric is therefore
+the lateral offset error and the relative yaw by distance, and the table above is read column by column: depth is already
+adequate, lateral is what remains, and lateral is yaw times distance (r = 0.98).
+
+**What limits lateral accuracy today.** The yaw error is a per-pick constant of about 1.3 deg (std) that every model shares,
+including one trained from the public weights with no common ancestry (r = 0.89): it is in the pallet-heading labels, not in
+the network. Until the heading in the lidar pallet fit is verified and corrected, the measured lateral error is a lower bound on
+the label error rather than a property of PalletDiT, and training cannot improve on it.
+
+**Running now (ml-02).** Yaw fusion along the approach: the frame rotations are propagated with the odometry and blended with a
+small weight on each new frame, and every frame's votes are re-projected with the fused rotation. This removes the
+frame-to-frame yaw scatter (0.6 deg, i.e. 11 cm sideways at 10 m) but not the per-pick bias; results with weights 0.2, 0.1 and
+0.05 on 60 clean picks are pending. The evaluator now reports lateral, depth and yaw errors directly, and the fused versions.
+
+**Next, in order.**
+1. Data side: verify and correct the pallet heading in the SensorUnit pallet fit (worst picks listed in
+   `docs/yaw_bias_per_pick_2026-10-20.csv`), regenerate the poses, re-evaluate PalletDiT on the same 201 picks. If the labels
+   were the problem, the lateral numbers above should drop substantially without retraining.
+2. Yaw-focused training once the labels are clean: more weight on the phi channel and a within-pick heading-consistency term
+   (the pallet does not move during an approach).
+3. The sequential estimator in deployment form: warm start from the fused pose, odometry noise model, cost of one extra step.
+4. Far field: resolution and data diversity, which only matter beyond 6 m.
+5. Export: the DINOv3 encoder already runs on the unit; the ViT is plain attention.
 
 ::::
 

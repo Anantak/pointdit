@@ -1,11 +1,11 @@
 ::: title
-## Pallet Pose on PointDiT: Code Guide
+## PalletDiT: Code Guide
 :::
 
 ::: authors
 Manuj Naman, with Claude (Anthropic) as implementation assistant<br>
 *Anantak Robotics*<br>
-2026-10-19
+2026-10-20
 :::
 
 :::: content
@@ -29,7 +29,10 @@ Manuj Naman, with Claude (Anthropic) as implementation assistant<br>
 | `pallet/evaluate.py` | evaluate a checkpoint: 1/3/5 steps, `--hybrid k`, `--rot-from obj`, `--split-from <run>` for a fixed split |
 | `pallet/visualize.py` | inspection panels in the pipeline's colour scheme |
 | `pallet/plot_runs.py` | fit-statistics chart from the logs |
-| `pallet/scripts/` | data feeders (ray loop, prefetch, puller, compactor), overnight chains |
+| `pallet/sequence.py` | sequential estimation: prior rendering from the previous frame, pose propagation/fusion, warm-start evaluation |
+| `pallet/yawfit.py` | per-pick yaw fit experiments (both objectives are blind to a global yaw; kept as the negative result) |
+| `pallet/make_split.py` | split.csv for THIS machine's manifest from a pick list (same picks on laptop and ml-02) |
+| `pallet/scripts/` | data feeders (ray loop, prefetch, puller, compactor), day/night chains, `md2pdf.js` |
 | `pallet/tests/` | 9 tests: round trips, geometry identities, pose recovery, GPU smoke test |
 
 Run anything with the repo venv: `.venv/bin/python -m pallet.<module>`; tests: `.venv/bin/python -m pytest pallet/tests -q`.
@@ -189,6 +192,21 @@ median theta/phi error; rotation error (Frobenius-based geodesic angle; arccos w
 |c − cam_in_pallet| with predicted mask and rotation; the same with GT mask and GT rotation (an upper bound on what the voting
 could do with perfect segmentation); vote spread; number of votes. `aggregate` takes medians per bin `(0,2,3,4.5,6,8,12)` m.
 
+### VIII b. Sequential estimation (`sequence.py`, `model.generate` warm start)
+
+`PalletNet.generate(image, steps, x_prior, prior_mask, t0, prior_fill)` starts the Euler integration at t0 from the prior instead
+of at 0 from zeros; unknown prior entries are filled with noise (`prior_fill="noise"`, the training distribution; `mixed` keeps
+known entries at the zero-noise mean). `sequence.render_prior` builds the prior for the next frame from the previous frame's
+pallet/load pixels (3-px z-buffer splat, P unchanged in the pallet frame, range recomputed) plus the visible ground plane;
+theta/phi come exactly from the propagated pose. `run_pick` walks a pick in time order with sources `pred` (own maps + own
+smoothed pose), `pred_gtpose`, `oracle`, `gtcur`, maintains the fused pose (`smooth_pose`, weight `pose_alpha` on the new vote,
+propagated with the recorded motion) and reports, per frame, the single/warm-start pose and the pose re-voted with the FUSED
+rotation (`fused_*` metrics). Training with priors: `PalletDataset(prior=PriorConfig(...))` + `PalletNet.forward(batch, prior_p)`.
+
+**Metrics for the product** (`metrics.image_metrics`): `lateral_err_cm` (offset from the pallet centreline, pallet x),
+`depth_err_cm` (pallet z), `yaw_err_deg` (about the vertical), and their `fused_*` versions; `format_table` prints them first.
+Findings so far: lateral error = distance x yaw error (r 0.98); the yaw error is a per-pick label bias (~1.3 deg std).
+
 ### IX. Data tooling (`compact.py`, `manifest.py`, `scripts/`)
 
 * **Compact records.** `compact_pick(src_rays, dst_rays)` keeps `cls, range, pallet_P_cam, cam_in_pallet, scan, ts_img_us`,
@@ -223,5 +241,10 @@ could do with perfect segmentation); vote spread; number of votes. `aggregate` t
   trained on: `runs/fixed_val/split.csv` marks the 201 such picks (built 2026-10-19 from the union of all `split.csv` train
   sets), used as `pallet/evaluate.py --split-from runs/fixed_val`.
 * **float32 rotations.** The stored `pallet_P_cam` is float32; use the Frobenius-based angle, not arccos of the trace.
+* **Priors and zeros.** At t > 0 an encoded 0 means "a point at the pallet origin"; never feed zeros where a prior is unknown.
+* **Splatting predictions.** Only splat predicted pallet/load pixels into a prior; predicted background/ground points land in
+  front of the pallet. Draw the ground plane analytically and only where it is visible.
+* **Yaw is not observable from the sequence geometry.** Trajectory consistency and vote dispersion are both invariant to a
+  global yaw; the heading must come from the image (or from corrected labels).
 
 ::::
