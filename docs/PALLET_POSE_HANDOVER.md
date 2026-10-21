@@ -111,6 +111,20 @@ Where the data is:
 
 ### 2026-10-20 19:00 — the model is named **PalletDiT**; work continues on ml-02
 
+- **21:35 yaw fusion = null result** (prior2, 60 clean picks, 1,746 frames, warm start t0 0.5, `runs/yawfuse_a02/a01/a005` on ml-02):
+  fused yaw 0.77 / 0.82 / 0.87 deg vs per-frame 0.79 / 0.77 / 0.77 (alpha 0.2 / 0.1 / 0.05); fused lateral 4.85 / 4.97 / 5.18 vs
+  per-frame 4.85 / 4.93 / 4.89 cm overall; per bin identical within noise (0-2 m 2.9, 2-3 m 3.5, 3-4.5 m 5.1-5.6, 8-12 m 17-19 cm).
+  Averaging the heading over the approach does not help because the per-frame yaw error is the per-pick bias, not scatter
+  (and the warm start already smooths the scatter). Reinforces: the label heading is the critical path for lateral accuracy.
+- Same run, lateral single vs warm start (own maps + own pose, t0 0.5), 60 picks: 3.3 / 3.9 / 6.1 / 8.4 / 10.9 / 16.3 cm ->
+  2.9 / 3.6 / 5.1 / 8.9 / 12.3 / 19.3 cm: the warm start helps < 4.5 m and HURTS beyond 6 m (stale prior from a worse frame).
+  Follow-up: distance-dependent t0 (strong near, weak far) or no warm start beyond ~5 m.
+- **22:10 yaw-independent steering accuracy (prior2, clean split)**: pallet centre lateral position in the CAMERA frame 1.4 / 1.8 /
+  1.8 / 1.9 / 2.6 / 3.1 cm per bin (vs centreline offset 3.0 / 4.3 / 6.7 / 9.2 / 13.4 / 15.6), bearing 0.2-0.5 deg, depth 1.6 /
+  2.2 / 2.6 / 4.2 / 6.9 / 11.2 cm. => PalletDiT finds the pallet CENTRE to 2-3 cm sideways at any distance incl. 10 m; only the
+  heading (yaw) is ~1 deg and label-limited. Product suggestion: steer on the centre bearing from afar, align to the centreline
+  as the lidar takes over; fix heading labels to unlock yaw. Paper section VIII updated with the table.
+
 - User: name = PalletDiT. Docs renamed (paper title, code guide), paper section VIII "Status and current work" added, PDFs regenerated.
 - Running on ml-02: yaw fusion along the approach (`pallet.sequence --sources pred --pose_alpha 0.2 / 0.1 / 0.05`, 60 clean picks,
   prior2), `runs/yawfuse_a0*` + `runs/yawfuse_chain.log` there. New metrics: lateral/depth/yaw (+ fused_*) in `metrics.py`.

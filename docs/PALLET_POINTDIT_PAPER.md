@@ -368,10 +368,32 @@ including one trained from the public weights with no common ancestry (r = 0.89)
 the network. Until the heading in the lidar pallet fit is verified and corrected, the measured lateral error is a lower bound on
 the label error rather than a property of PalletDiT, and training cannot improve on it.
 
-**Running now (ml-02).** Yaw fusion along the approach: the frame rotations are propagated with the odometry and blended with a
-small weight on each new frame, and every frame's votes are re-projected with the fused rotation. This removes the
-frame-to-frame yaw scatter (0.6 deg, i.e. 11 cm sideways at 10 m) but not the per-pick bias; results with weights 0.2, 0.1 and
-0.05 on 60 clean picks are pending. The evaluator now reports lateral, depth and yaw errors directly, and the fused versions.
+**Yaw fusion along the approach (done, null result).** The frame rotations were propagated with the odometry and blended with a
+weight of 0.2, 0.1 or 0.05 on each new frame, and every frame's votes re-projected with the fused rotation, on 60 clean picks
+(1,746 frames). The fused yaw error equals the per-frame one (0.77–0.87 vs 0.77–0.79 deg) and so does the lateral error
+(4.9–5.2 vs 4.9 cm overall, identical per bin). Averaging the heading over the approach cannot help because the per-frame yaw
+error is the per-pick bias, not scatter. In lateral terms the warm start itself (own maps, own pose, t0 0.5) against
+single-frame on the same 60 picks reads 2.9 / 3.6 / 5.1 cm vs 3.3 / 3.9 / 6.1 cm at 0–2 / 2–3 / 3–4.5 m, and 12.3 / 19.3 vs
+10.9 / 16.3 cm at 6–8 / 8–12 m: it helps near the pallet and hurts far away, where a stale prior from a worse frame dominates.
+A distance-dependent t0 (strong prior near, weak far) is the obvious follow-up.
+
+**Steering before the yaw is known.** The unit can also steer on the pallet centre as seen from the camera, i.e. the bearing and
+the lateral position of the pallet origin in the camera frame, which do not depend on the heading estimate. For prior2 on the
+clean split these are far more accurate than the centreline offset:
+
+| face distance | lateral offset from the centreline (needs yaw) | pallet centre, lateral in the camera frame | bearing to the centre | depth to the centre |
+|---|---|---|---|---|
+| 0–2 m | 3.0 cm | 1.4 cm | 0.48 deg | 1.6 cm |
+| 2–3 m | 4.3 cm | 1.8 cm | 0.42 deg | 2.2 cm |
+| 3–4.5 m | 6.7 cm | 1.8 cm | 0.28 deg | 2.6 cm |
+| 4.5–6 m | 9.2 cm | 1.9 cm | 0.19 deg | 4.2 cm |
+| 6–8 m | 13.4 cm | 2.6 cm | 0.21 deg | 6.9 cm |
+| 8–12 m | 15.6 cm | 3.1 cm | 0.20 deg | 11.2 cm |
+
+PalletDiT locates the pallet centre to 2–3 cm sideways and 0.2–0.5 deg of bearing at every distance, including 10 m. What it
+cannot yet give to better than ~1 deg is the pallet's heading, and only the heading is label-limited. For the approach this
+suggests steering on the centre bearing from afar, and aligning to the centreline (heading) as the lidar takes over near the
+pallet, until the heading labels are fixed and the yaw can be trained and evaluated properly.
 
 **Next, in order.**
 1. Data side: verify and correct the pallet heading in the SensorUnit pallet fit (worst picks listed in

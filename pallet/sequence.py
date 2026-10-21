@@ -108,7 +108,7 @@ def smooth_pose(R_prop, c_prop, R_new, c_new, alpha):
 
 @torch.no_grad()
 def run_pick(net, ds: PalletDataset, idx: list[int], source: str, t0: float, steps: int, dev, prior_fill="noise", splat=3,
-             prior_classes=(T.CLS_PALLET, T.CLS_LOAD), consistency_m=0.0, pose_alpha=1.0, prior_channels="all"):
+             prior_classes=(T.CLS_PALLET, T.CLS_LOAD), consistency_m=0.0, pose_alpha=1.0, prior_channels="all", t0_far=(None, None)):
     """Frames idx of one pick in time order. Returns per-frame metric rows (+ 'prior_valid_frac').
     source: pred | pred_gtpose | oracle | oracle_predpose | gtcur | pose (angles only, own smoothed pose) | pose_gtpose.
     Own-prediction maps are restricted to prior_classes and to pixels whose P and range agree within consistency_m (metres);
@@ -120,7 +120,11 @@ def run_pick(net, ds: PalletDataset, idx: list[int], source: str, t0: float, ste
         H, W = s["cls"].shape; intr = s["intrinsics"].tolist(); real = s["pixel_mask"].numpy()
         pose_gt = s["pallet_P_cam"].numpy().astype(np.float64)
         x_prior = m_prior = None; pvf = 0.0
-        if prev is not None and t0 > 0:
+        t0_eff = t0
+        if prev is not None and t0_far[0] is not None:                      # distance-dependent trust: full t0 up to d_near, 0 beyond d_far
+            d_near, d_far = t0_far; d_est = float(np.linalg.norm(prev["c_sm"])) if np.all(np.isfinite(prev["c_sm"])) else d_far
+            t0_eff = t0 * float(np.clip((d_far - d_est) / max(d_far - d_near, 1e-6), 0.0, 1.0))
+        if prev is not None and t0_eff > 0:
             dT = relative_motion(prev["pose_gt"], pose_gt)                         # perfect odometry for now
             if source == "gtcur":
                 cont, mask = s["target"].numpy(), s["valid_mask"].numpy()
@@ -147,7 +151,7 @@ def run_pick(net, ds: PalletDataset, idx: list[int], source: str, t0: float, ste
             x_prior = torch.from_numpy(cont)[None].to(dev); m_prior = torch.from_numpy(mask)[None].to(dev)
         with torch.autocast("cuda", dtype=torch.bfloat16):
             x, logits = net.generate(s["image"][None].to(dev), steps=steps, x_prior=x_prior, prior_mask=m_prior,
-                                     t0=(t0 if x_prior is not None else 0.0), prior_fill=prior_fill, generator=gen)
+                                     t0=(t0_eff if x_prior is not None else 0.0), prior_fill=prior_fill, generator=gen)
         row = image_metrics(s, x[0], logits[0]); row["prior_valid_frac"] = pvf; row["warm"] = x_prior is not None
         rows.append(row)
         dec = T.decode(x[0].cpu().numpy(), np.ones((6, H, W), bool)); cls_pred = logits[0].argmax(0).cpu().numpy()
@@ -198,6 +202,7 @@ def main():
     ap.add_argument("--prior_ground", action="store_true", help="also splat predicted ground pixels (ground plane is drawn analytically anyway)")
     ap.add_argument("--pose_alpha", type=float, default=1.0, help="weight of the newest vote in the smoothed own pose (1 = raw vote)")
     ap.add_argument("--prior_channels", default="all", choices=["all", "maps"], help="maps: prior for P/range only, angles left unknown")
+    ap.add_argument("--t0_far", type=float, nargs=2, default=None, metavar=("D_NEAR", "D_FAR"), help="scale t0 from full at <= D_NEAR m to 0 at >= D_FAR m (estimated distance from the previous frame)")
     ap.add_argument("--out", default="runs/seq_eval")
     a = ap.parse_args()
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
@@ -220,9 +225,10 @@ def main():
         for idx in groups:
             rows += run_pick(net, ds, idx, src, t0, st, dev, a.prior_fill, a.splat,
                              prior_classes=(T.CLS_PALLET, T.CLS_LOAD) + ((T.CLS_GROUND,) if a.prior_ground else ()),
-                             consistency_m=a.consistency_cm / 100.0, pose_alpha=a.pose_alpha, prior_channels=a.prior_channels)
+                             consistency_m=a.consistency_cm / 100.0, pose_alpha=a.pose_alpha, prior_channels=a.prior_channels,
+                             t0_far=tuple(a.t0_far) if a.t0_far else (None, None))
         agg = aggregate(rows); jit = jitter(rows)
-        name = f"{src}_t{t0}_s{st}" + ("" if a.prior_channels == "all" else "_maps") + ("" if a.prior_fill == "noise" else f"_{a.prior_fill}")
+        name = f"{src}_t{t0}_s{st}" + ("" if a.prior_channels == "all" else "_maps") + ("" if a.prior_fill == "noise" else f"_{a.prior_fill}") + (f"_far{a.t0_far[0]:g}-{a.t0_far[1]:g}" if a.t0_far else "")
         json.dump({"config": name, "per_image": rows, "aggregate": agg, "jitter_cm": jit}, open(out / f"{name}.json", "w"), indent=1)
         warm = [r for r in rows if r["warm"]]
         sm = float(np.median([r["smoothed_origin_err_cm"] for r in rows if np.isfinite(r.get("smoothed_origin_err_cm", np.nan))]))

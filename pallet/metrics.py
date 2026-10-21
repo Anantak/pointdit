@@ -43,11 +43,17 @@ def image_metrics(sample: dict, x_pred: torch.Tensor, logits: torch.Tensor, rot_
     ang = np.arccos(np.clip((np.trace(dR) - 1) / 2, -1, 1))
     axis = np.array([dR[2, 1] - dR[1, 2], dR[0, 2] - dR[2, 0], dR[1, 0] - dR[0, 1]])
     m["rot_err_vec_deg"] = (np.degrees(ang) * axis / max(np.linalg.norm(axis), 1e-12)).tolist()
+
+    m["origin_err_cm"] = float(np.linalg.norm(est["c"] - c_gt) * 100)
+    m["origin_err_xyz_cm"] = ((est["c"] - c_gt) * 100).tolist()
     m["lateral_err_cm"] = abs(m["origin_err_xyz_cm"][0])                     # offset from the pallet centreline (pallet x)
     m["depth_err_cm"] = abs(m["origin_err_xyz_cm"][2])                        # along the pallet normal (pallet z)
     m["yaw_err_deg"] = abs(m["rot_err_vec_deg"][1])                           # heading about the vertical (pallet y)
-    m["origin_err_cm"] = float(np.linalg.norm(est["c"] - c_gt) * 100)
-    m["origin_err_xyz_cm"] = ((est["c"] - c_gt) * 100).tolist()
+    # the pallet origin seen from the camera (camera frame: x right, z forward): what the unit can steer on before the yaw is known
+    o_est, o_gt = -est["R"].T @ est["c"], -R_gt.T @ c_gt
+    m["centre_cam_lateral_err_cm"] = float(abs(o_est[0] - o_gt[0]) * 100)
+    m["centre_cam_depth_err_cm"] = float(abs(o_est[2] - o_gt[2]) * 100)
+    m["bearing_err_deg"] = float(np.degrees(abs(np.arctan2(o_est[0], o_est[2]) - np.arctan2(o_gt[0], o_gt[2]))))
     m["vote_spread_cm"] = est["spread"] * 100
     m["n_votes"] = est["n_votes"]
     est_gt = estimate_pose(pr["P"], pr["range"], pr["theta"], pr["phi"], rays, obj, real, R=R_gt)   # GT mask + GT R
@@ -60,7 +66,8 @@ def aggregate(rows: list[dict], bins=DIST_BINS) -> list[dict]:
     out = []
     keys = ("cls_acc", "iou_pallet", "iou_load", "P_err_cm", "range_err_cm", "theta_err_deg", "phi_err_deg",
             "rot_err_deg", "origin_err_cm", "origin_err_gtmask_cm", "vote_spread_cm", "lateral_err_cm", "depth_err_cm", "yaw_err_deg",
-            "fused_lateral_err_cm", "fused_depth_err_cm", "fused_yaw_err_deg", "fused_origin_err_cm")
+            "fused_lateral_err_cm", "fused_depth_err_cm", "fused_yaw_err_deg", "fused_origin_err_cm",
+            "centre_cam_lateral_err_cm", "centre_cam_depth_err_cm", "bearing_err_deg")
     d = np.array([r["face_dist_m"] for r in rows])
     for lo, hi in list(zip(bins[:-1], bins[1:])) + [(0.0, np.inf)]:
         sel = [r for r, x in zip(rows, d) if lo <= x < hi]
@@ -80,7 +87,7 @@ def format_table(agg: list[dict], product: bool = True) -> str:
             "rot_err_deg", "origin_err_cm", "origin_err_gtmask_cm", "vote_spread_cm"]
     out = []
     if product and agg and "lateral_err_cm" in agg[0]:
-        pc = ["bin", "n", "lateral_err_cm", "depth_err_cm", "yaw_err_deg", "origin_err_cm"]
+        pc = ["bin", "n", "lateral_err_cm", "depth_err_cm", "yaw_err_deg", "origin_err_cm", "centre_cam_lateral_err_cm", "bearing_err_deg"]
         if agg[0].get("fused_lateral_err_cm") == agg[0].get("fused_lateral_err_cm"):     # not NaN -> fused columns present
             pc += ["fused_lateral_err_cm", "fused_depth_err_cm", "fused_yaw_err_deg", "fused_origin_err_cm"]
         out.append("  ".join(f"{c:>20s}" for c in pc))
