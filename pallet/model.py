@@ -25,6 +25,10 @@ class PalletNet(nn.Module):
         super().__init__()
         self.net = PointDiT_models[model](input_size=input_size, in_channels=T.NUM_CONT,
                                           feature_embedding_type=feature_embedding_type)
+        # PointDiT.__init__ ends with initialize_weights(), which Xavier-initialises EVERY nn.Linear, including the DINOv3 encoder it
+        # has just loaded through torch.hub; upstream main.py reloads the encoder afterwards. Do the same here (strict), otherwise
+        # the "frozen DINOv3" is a frozen random network (this was the case for every run up to 2026-10-24, see the handover).
+        self.dinov3_loaded = self.reload_dinov3(feature_embedding_type)
         hidden, ps = self.net.hidden_size, self.net.patch_size
         self.net.out_channels = T.NUM_CONT + T.NUM_CLASSES
         self.net.final_layer.linear = nn.Linear(hidden, ps * ps * self.net.out_channels, bias=True)
@@ -36,6 +40,20 @@ class PalletNet(nn.Module):
         self.register_buffer("channel_weights", cw.view(1, T.NUM_CONT, 1, 1), persistent=False)
 
     # -- weights -----------------------------------------------------------------------------------------------
+    DINOV3_FILES = {"dinov3_vitb16": "dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth", "dinov3_vitl16": "dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth",
+                    "dinov3_vith16plus": "dinov3_vith16plus_pretrain_lvd1689m-7c1da9a5.pth"}
+
+    def reload_dinov3(self, feature_embedding_type: str) -> bool:
+        """Load the gated DINOv3 weights into net.y_embedder from DINOV3_WEIGHTS_DIR (or pretrained/dinov3). Returns False if absent."""
+        import os
+        from pathlib import Path
+        d = Path(os.environ.get("DINOV3_WEIGHTS_DIR", Path(__file__).resolve().parents[1] / "pretrained" / "dinov3"))
+        f = d / self.DINOV3_FILES.get(feature_embedding_type, "")
+        if not f.is_file():
+            return False
+        self.net.y_embedder.load_state_dict(torch.load(f, map_location="cpu"), strict=True)
+        return True
+
     def load_pretrained(self, path: str, use_ema: bool = True) -> dict:
         """Load a released PointDiT checkpoint; the 3-channel patch-embed conv and the final linear are left at init.
         Returns {"dropped": [...], "missing": [...], "unexpected": [...]} for logging."""
@@ -49,6 +67,22 @@ class PalletNet(nn.Module):
         bad = [k for k in missing if k not in dropped]
         assert not bad and not res.unexpected_keys, (bad, res.unexpected_keys)
         return {"dropped": dropped, "missing": missing, "unexpected": list(res.unexpected_keys)}
+
+    @classmethod
+    def load_inference(cls, path: str, device="cuda"):
+        """Build a PalletNet from an exported inference checkpoint (pallet/export_checkpoint.py): EMA weights, DINOv3 stripped."""
+        ck = torch.load(path, map_location="cpu", weights_only=False)
+        meta = ck["meta"]
+        net = cls(model=meta["model"], feature_embedding_type=meta["feature_embedding_type"])
+        sd = {k: (v.float() if v.is_floating_point() else v) for k, v in ck["model"].items()}
+        res = net.load_state_dict(sd, strict=False)
+        if meta.get("dinov3_stripped", True):
+            assert net.dinov3_loaded, "DINOv3 weights not found: set DINOV3_WEIGHTS_DIR"
+            bad = [k for k in res.missing_keys if not k.startswith("net.y_embedder.")]
+        else:
+            bad = list(res.missing_keys)
+        assert not bad and not res.unexpected_keys, (bad, res.unexpected_keys)
+        return net.to(device).eval(), meta
 
     def trainable_parameters(self):
         return [p for n, p in self.named_parameters() if p.requires_grad and not n.startswith("net.y_embedder.")]

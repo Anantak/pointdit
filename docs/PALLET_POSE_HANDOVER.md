@@ -109,6 +109,22 @@ Where the data is:
 
 ## Session notes (newest first)
 
+### 2026-10-24 — FOUND: the DINOv3 encoder was never loaded (frozen RANDOM encoder in every run so far)
+
+- While exporting an inference checkpoint, the fp16 export (DINOv3 stripped, reloaded from the release file) disagreed with the
+  fp32 EMA by metres. Cause: `PointDiT.__init__` loads DINOv3 through torch.hub and then calls `initialize_weights()`, which
+  Xavier-initialises EVERY `nn.Linear` including the encoder; upstream `main.py` reloads the encoder afterwards (lines ~693-712),
+  `PalletNet` never did. Verified: standalone hub load == release file (corr 1.0); inside PointDiT after `__init__` corr 0.000;
+  two fresh constructions differ. **Runs 1-6, prior1, prior2, indep all trained and evaluated with a frozen random DINOv3-B.**
+  All reported numbers stand as measurements of those models; they were obtained without the pretrained encoder's features.
+- Fix: `PalletNet.reload_dinov3()` (strict load from `DINOV3_WEIGHTS_DIR`, called in `__init__`; `dinov3_loaded` flag);
+  `tests/test_dinov3_loaded.py`. Old checkpoints still load exactly (their state dicts carry their own encoder weights).
+- Export: for the old lineage the encoder must be KEPT in the export (`export_checkpoint.py --keep-encoder`; it is not Meta's
+  weights, so no licence issue); `load_inference` handles both. A new series trained with the real encoder can be exported stripped.
+- Next: new training series on ml-02 with the real DINOv3 (from the public B/256 weights, whose transformer expects these
+  features). Expect faster convergence and better accuracy, especially far field and generalisation. Compare on `runs/fixed_val`.
+
+
 ### 2026-10-21 — CONTEXT SAVED; nothing running; resume points
 
 **Where PalletDiT stands.** Best model `runs/b256_prior2` (checkpoint on the laptop and on ml-02; EMA under key `ema`). Clean split
